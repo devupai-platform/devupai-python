@@ -32,12 +32,12 @@ jobs:
             python-version: "3.15"
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -65,17 +65,8 @@ jobs:
       - name: Check the package metadata
         run: python -m twine check --strict dist/*
 
-      - name: List the distribution files
-        shell: bash
-        run: |
-          set -euo pipefail
-          wheel_files="$(python -m zipfile -l dist/*.whl)"
-          sdist_files="$(tar -tzf dist/*.tar.gz)"
-          printf '%s\n' "Wheel:" "$wheel_files" "" "Source distribution:" "$sdist_files"
-          if printf '%s\n' "$wheel_files" "$sdist_files" | grep -q 'openapi/'; then
-            echo "The distribution files must not contain openapi/." >&2
-            exit 1
-          fi
+      - name: Check the distribution contents
+        run: python scripts/check_wheel_contents.py dist
 
   lowest-dependencies:
     name: Python 3.11.0 with the lowest dependency versions
@@ -83,12 +74,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python 3.11.0
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11.0"
 

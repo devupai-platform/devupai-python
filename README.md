@@ -10,8 +10,10 @@ Python 3.11 or later.
 ## Installation
 
 ```bash
-pip install devupai
+pip install --pre devupai
 ```
+
+Version 1.0.0 removes the need for `--pre`.
 
 ## Create a client
 

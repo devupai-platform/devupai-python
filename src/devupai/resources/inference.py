@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, overload
 
-from devupai._response import APIResponse
+from devupai._response import APIResponse, AsyncBinaryResponse, BinaryResponse
 from devupai.resources._base import (
-    NOT_IMPLEMENTED_MESSAGE,
     AsyncAPIResource,
     SyncAPIResource,
     billed_post_retry,
-    contains_file_input,
     encode_model_path,
     endpoint,
-    is_file_input,
     json_body,
     options,
+    with_data,
 )
+from devupai.resources.shared import MultipartPart, contains_file_input, every_field_form
 
 __all__ = [
     "NativeInference",
@@ -27,6 +26,7 @@ __all__ = [
 ]
 
 _PATH_TEMPLATE = "/inference/{model_path}"
+_PAYLOAD_MESSAGE = "The payload of inference.run must be a mapping of field names to values."
 
 ResponseType = Literal["json", "binary"]
 """How the answer of :meth:`NativeInference.run` is read: parsed as JSON, or as a file."""
@@ -35,21 +35,58 @@ ResponseType = Literal["json", "binary"]
 def _prepare(
     model_path: str,
     payload: Mapping[str, object],
-    response_type: ResponseType,
     extra_body: Mapping[str, object] | None,
-) -> tuple[str, dict[str, object]]:
-    """The path and JSON body of a call, after the checks for the forms that come in a later build."""
-    if response_type == "binary" or is_file_input(payload):
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+) -> tuple[str, dict[str, object] | None, list[MultipartPart] | None]:
+    """The path of a call, and its JSON body or, when a field is a file (or a list contains one), the multipart
+    parts of every field."""
+    if not isinstance(payload, Mapping):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError(_PAYLOAD_MESSAGE)
+    path = f"/inference/{encode_model_path(model_path)}"
     body = json_body(payload, extra_body)
     if any(contains_file_input(value) for value in body.values()):
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
-    return f"/inference/{encode_model_path(model_path)}", body
+        return path, None, every_field_form(body)
+    return path, body, None
 
 
 class NativeInferenceWithResponse(SyncAPIResource):
     """The methods of :class:`NativeInference`, returning the whole :class:`~devupai.APIResponse`."""
 
+    @overload
+    def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["binary"],
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[BinaryResponse]: ...
+    @overload
+    def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["json"] = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[object]: ...
+    @overload
+    def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: ResponseType = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[object] | APIResponse[BinaryResponse]: ...
     @endpoint("POST", _PATH_TEMPLATE, billed=True)
     def run(
         self,
@@ -61,16 +98,22 @@ class NativeInferenceWithResponse(SyncAPIResource):
         timeout: float | None = None,
         max_retries: int | None = None,
         extra_body: Mapping[str, object] | None = None,
-    ) -> APIResponse[object]:
+    ) -> APIResponse[object] | APIResponse[BinaryResponse]:
         """Sends a model-specific payload to a model; see :meth:`NativeInference.run`."""
-        path, body = _prepare(model_path, payload, response_type, extra_body)
-        return self._send(
+        path, body, parts = _prepare(model_path, payload, extra_body)
+        binary = response_type == "binary"
+        response = self._send(
             "POST",
             path,
             body=body,
+            multipart=parts,
             retry=billed_post_retry(),
+            kind="raw" if binary else "json",
             options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
         )
+        if binary:
+            return with_data(response, BinaryResponse(response.response))
+        return response
 
 
 class NativeInference(SyncAPIResource):
@@ -81,6 +124,30 @@ class NativeInference(SyncAPIResource):
         """The same methods, returning the whole :class:`~devupai.APIResponse` (headers, request id, warnings)."""
         return NativeInferenceWithResponse(self._client)
 
+    @overload
+    def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["binary"],
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> BinaryResponse: ...
+    @overload
+    def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: ResponseType = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> object: ...
     @endpoint("POST", _PATH_TEMPLATE, billed=True)
     def run(
         self,
@@ -93,21 +160,30 @@ class NativeInference(SyncAPIResource):
         max_retries: int | None = None,
         extra_body: Mapping[str, object] | None = None,
     ) -> object:
-        """Sends a model-specific payload to a model and returns its result, parsed from JSON.
+        """Sends a model-specific payload to a model and returns its result.
 
-        The payload is sent as JSON, as it is. ``model_path`` is the model id: leading slashes are removed, and an id
-        that is already percent-encoded is decoded first, so it is sent as one path segment encoded exactly once.
+        ``model_path`` is the model id: leading slashes are removed, and an id that is already percent-encoded is
+        decoded first, so it is sent as one path segment encoded exactly once.
 
-        ``response_type="binary"`` (an answer that is a file) and a file in the payload (bytes, a path or an open
-        file, which needs the multipart form) are available in a later build: they raise ``NotImplementedError``
-        before anything is sent.
+        The payload is sent as JSON, as it is. When a field is a file (bytes, a path, an open binary file or a
+        ``(filename, content[, content_type])`` tuple), or a list contains one, the payload is sent as
+        ``multipart/form-data`` instead: a file is a file part, a ``str`` a text part, a list gives one part per item
+        under the field name, a mapping is sent as its JSON text and a number or a boolean as text. A path is opened
+        and closed by the SDK; an open file is read and left open.
 
-        ``extra_body`` adds fields to the JSON body (merged last), ``extra_headers`` adds request headers, and
+        The answer is parsed as JSON. With ``response_type="binary"``, for a model that answers with a file (an
+        image, an audio clip or a video), it is returned as a :class:`~devupai.BinaryResponse` with its body not
+        read yet.
+
+        ``extra_body`` adds fields to the payload (merged last), ``extra_headers`` adds request headers, and
         ``timeout`` and ``max_retries`` apply to this call only.
 
         Example::
 
             result = client.inference.run("<model-id>", {"input": "Hello"})
+
+            with client.inference.run("<model-id>", {"prompt": "A sunrise"}, response_type="binary") as image:
+                image.write_to_file("sunrise.png")
         """
         return self.with_response.run(
             model_path,
@@ -123,6 +199,42 @@ class NativeInference(SyncAPIResource):
 class AsyncNativeInferenceWithResponse(AsyncAPIResource):
     """The methods of :class:`AsyncNativeInference`, returning the whole :class:`~devupai.APIResponse`."""
 
+    @overload
+    async def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["binary"],
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[AsyncBinaryResponse]: ...
+    @overload
+    async def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["json"] = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[object]: ...
+    @overload
+    async def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: ResponseType = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> APIResponse[object] | APIResponse[AsyncBinaryResponse]: ...
     @endpoint("POST", _PATH_TEMPLATE, billed=True)
     async def run(
         self,
@@ -134,16 +246,22 @@ class AsyncNativeInferenceWithResponse(AsyncAPIResource):
         timeout: float | None = None,
         max_retries: int | None = None,
         extra_body: Mapping[str, object] | None = None,
-    ) -> APIResponse[object]:
+    ) -> APIResponse[object] | APIResponse[AsyncBinaryResponse]:
         """Sends a model-specific payload to a model; see :meth:`AsyncNativeInference.run`."""
-        path, body = _prepare(model_path, payload, response_type, extra_body)
-        return await self._send(
+        path, body, parts = _prepare(model_path, payload, extra_body)
+        binary = response_type == "binary"
+        response = await self._send(
             "POST",
             path,
             body=body,
+            multipart=parts,
             retry=billed_post_retry(),
+            kind="raw" if binary else "json",
             options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
         )
+        if binary:
+            return with_data(response, AsyncBinaryResponse(response.response))
+        return response
 
 
 class AsyncNativeInference(AsyncAPIResource):
@@ -154,6 +272,30 @@ class AsyncNativeInference(AsyncAPIResource):
         """The same methods, returning the whole :class:`~devupai.APIResponse` (headers, request id, warnings)."""
         return AsyncNativeInferenceWithResponse(self._client)
 
+    @overload
+    async def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: Literal["binary"],
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> AsyncBinaryResponse: ...
+    @overload
+    async def run(
+        self,
+        model_path: str,
+        payload: Mapping[str, object],
+        *,
+        response_type: ResponseType = "json",
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        extra_body: Mapping[str, object] | None = None,
+    ) -> object: ...
     @endpoint("POST", _PATH_TEMPLATE, billed=True)
     async def run(
         self,
@@ -166,21 +308,32 @@ class AsyncNativeInference(AsyncAPIResource):
         max_retries: int | None = None,
         extra_body: Mapping[str, object] | None = None,
     ) -> object:
-        """Sends a model-specific payload to a model and returns its result, parsed from JSON.
+        """Sends a model-specific payload to a model and returns its result.
 
-        The payload is sent as JSON, as it is. ``model_path`` is the model id: leading slashes are removed, and an id
-        that is already percent-encoded is decoded first, so it is sent as one path segment encoded exactly once.
+        ``model_path`` is the model id: leading slashes are removed, and an id that is already percent-encoded is
+        decoded first, so it is sent as one path segment encoded exactly once.
 
-        ``response_type="binary"`` (an answer that is a file) and a file in the payload (bytes, a path or an open
-        file, which needs the multipart form) are available in a later build: they raise ``NotImplementedError``
-        before anything is sent.
+        The payload is sent as JSON, as it is. When a field is a file (bytes, a path, an open binary file or a
+        ``(filename, content[, content_type])`` tuple), or a list contains one, the payload is sent as
+        ``multipart/form-data`` instead: a file is a file part, a ``str`` a text part, a list gives one part per item
+        under the field name, a mapping is sent as its JSON text and a number or a boolean as text. A path is opened
+        and closed by the SDK; an open file is read and left open.
 
-        ``extra_body`` adds fields to the JSON body (merged last), ``extra_headers`` adds request headers, and
+        The answer is parsed as JSON. With ``response_type="binary"``, for a model that answers with a file (an
+        image, an audio clip or a video), it is returned as an :class:`~devupai.AsyncBinaryResponse` with its body
+        not read yet.
+
+        ``extra_body`` adds fields to the payload (merged last), ``extra_headers`` adds request headers, and
         ``timeout`` and ``max_retries`` apply to this call only.
 
         Example::
 
             result = await client.inference.run("<model-id>", {"input": "Hello"})
+
+            async with await client.inference.run(
+                "<model-id>", {"prompt": "A sunrise"}, response_type="binary"
+            ) as image:
+                await image.write_to_file("sunrise.png")
         """
         response = await self.with_response.run(
             model_path,

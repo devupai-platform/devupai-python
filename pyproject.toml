@@ -53,7 +53,7 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "scripts"]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
 

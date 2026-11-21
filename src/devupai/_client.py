@@ -13,10 +13,10 @@ import random
 import re
 import ssl
 import time
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Literal, Self, TypedDict, TypeVar, cast
+from typing import Any, Literal, Self, TypeAlias, TypedDict, TypeVar, cast
 
 import anyio
 import httpx
@@ -65,10 +65,14 @@ __all__ = [
     "AsyncDevupAI",
     "DebugEvent",
     "DevupAI",
+    "MultipartParts",
+    "MultipartValue",
     "RequestOptions",
+    "ResponseKind",
     "RetryPolicy",
     "async_request",
     "connection_never_opened",
+    "effective_idle_timeout",
     "sync_request",
 ]
 
@@ -129,8 +133,32 @@ _HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 # Failures of a body read that come from the connection or from the bytes the API sent (a body that cannot be
 # decoded, for example a corrupt gzip). Any other exception raised while a body is read is raised unchanged.
 _BODY_READ_ERRORS = (httpx.TransportError, httpx.DecodingError)
+_BODY_AND_MULTIPART_MESSAGE = "A request takes a JSON body or multipart parts, not both."
+_MULTIPART_PART_MESSAGE = (
+    "A multipart part must be (name, text) or (name, (filename, content bytes, content type or None))."
+)
+_MULTIPART_TYPE_MESSAGE = "A multipart part has a content type that is not allowed in an HTTP header."
+# A part's name and filename go in a quoted Content-Disposition parameter. As in the WHATWG multipart encoding that
+# Node's FormData uses, only CR, LF and '"' are percent-encoded, so a value can never end the parameter or the header
+# line; a backslash and every other character are sent as they are.
+_FORM_PARAM_REPLACEMENTS: dict[str, str] = {"\r": "%0D", "\n": "%0A", '"': "%22"}
+_FORM_PARAM_CHARS = re.compile("|".join(re.escape(char) for char in _FORM_PARAM_REPLACEMENTS))
+_OCTET_STREAM = "application/octet-stream"
 
-ResponseKind = Literal["json", "text", "raw"]
+ResponseKind = Literal["json", "text", "raw", "stream"]
+"""How a successful body is read: ``"json"`` and ``"text"`` read it whole inside the deadline; ``"raw"`` and
+``"stream"`` return the ``httpx.Response`` with its body unread, and the deadline covers only the time until the
+headers arrive."""
+
+MultipartValue: TypeAlias = str | tuple[str, bytes, str | None]
+"""One multipart part value: a text, or ``(filename, content, content_type)``; a ``None`` content type is sent as
+``application/octet-stream``."""
+MultipartParts: TypeAlias = Sequence[tuple[str, MultipartValue]]
+"""The parts of a multipart body as ``(name, value)`` pairs, sent in this order."""
+
+# The kinds whose successful response is returned with its body unread.
+_UNREAD_KINDS: frozenset[str] = frozenset({"raw", "stream"})
+_ACCEPT: dict[str, str] = {"json": "application/json", "stream": "text/event-stream", "text": "*/*", "raw": "*/*"}
 
 
 @dataclass(frozen=True)
@@ -334,6 +362,66 @@ def _decode(content: bytes) -> str:
     return content.decode("utf-8-sig", errors="replace")
 
 
+def _form_param(name: str, value: str) -> bytes:
+    """``name="value"`` for a Content-Disposition header, with the value escaped."""
+    escaped = _FORM_PARAM_CHARS.sub(lambda match: _FORM_PARAM_REPLACEMENTS[match.group(0)], value)
+    return f'{name}="{escaped}"'.encode()
+
+
+def _check_part(part: object) -> tuple[str, str | tuple[str, bytes, str]]:
+    """One ``(name, value)`` part, checked, with a file part's content type filled in."""
+    if not isinstance(part, tuple) or len(part) != 2:  # pyright: ignore[reportUnknownArgumentType]
+        raise TypeError(_MULTIPART_PART_MESSAGE)
+    name, value = cast("tuple[object, object]", part)
+    if not isinstance(name, str):
+        raise TypeError(_MULTIPART_PART_MESSAGE)
+    if isinstance(value, str):
+        return name, value
+    if not isinstance(value, tuple) or len(value) != 3:  # pyright: ignore[reportUnknownArgumentType]
+        raise TypeError(_MULTIPART_PART_MESSAGE)
+    filename, content, content_type = cast("tuple[object, object, object]", value)
+    if not isinstance(filename, str) or not isinstance(content, bytes):
+        raise TypeError(_MULTIPART_PART_MESSAGE)
+    if content_type is None:
+        content_type = _OCTET_STREAM
+    if not isinstance(content_type, str):
+        raise TypeError(_MULTIPART_PART_MESSAGE)
+    content_type = content_type.strip(_HEADER_WHITESPACE)
+    if not content_type or _FORBIDDEN_HEADER_CHARS.search(content_type) or not content_type.isascii():
+        raise ValueError(_MULTIPART_TYPE_MESSAGE)
+    return name, (filename, content, content_type)
+
+
+def _encode_multipart(parts: MultipartParts) -> tuple[bytes, str]:
+    """The ``multipart/form-data`` body of ``parts``, in their order, and its ``Content-Type`` value.
+
+    A text part has only a Content-Disposition header; a file part also has its filename and a Content-Type. The
+    body is built once, so every attempt of the request sends the same bytes.
+    """
+    rendered: list[tuple[bytes, bytes]] = []
+    for part in parts:
+        name, value = _check_part(part)
+        if isinstance(value, str):
+            head = b"Content-Disposition: form-data; " + _form_param("name", name)
+            rendered.append((head + b"\r\n\r\n", value.encode("utf-8")))
+            continue
+        filename, content, content_type = value
+        head = b"Content-Disposition: form-data; " + _form_param("name", name)
+        if filename:
+            head += b"; " + _form_param("filename", filename)
+        head += b"\r\nContent-Type: " + content_type.encode("ascii")
+        rendered.append((head + b"\r\n\r\n", content))
+    boundary = os.urandom(16).hex().encode("ascii")
+    # A boundary must not appear inside a part; with 128 random bits this loop almost never runs twice.
+    while any(boundary in head or boundary in data for head, data in rendered):
+        boundary = os.urandom(16).hex().encode("ascii")
+    chunks: list[bytes] = []
+    for head, data in rendered:
+        chunks.extend((b"--", boundary, b"\r\n", head, data, b"\r\n"))
+    chunks.extend((b"--", boundary, b"--\r\n"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary.decode('ascii')}"
+
+
 class _DeadlinePassed(Exception):
     """Raised while a body is read once the deadline of the call has passed."""
 
@@ -454,6 +542,11 @@ class _BaseClient:
         """Seconds without data after which a stream ends, or ``None`` when it is off."""
         return self._stream_idle_timeout
 
+    def _effective_idle_timeout(self, options: RequestOptions | None) -> float | None:
+        """The idle timeout of one call: the per-call option when given (``0`` turns it off), else the client's."""
+        given = None if options is None else options.get("stream_idle_timeout")
+        return self._stream_idle_timeout if given is None else _check_idle_timeout(given)
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(base_url={self._base_url!r})"
 
@@ -472,31 +565,35 @@ class _BaseClient:
         retry: RetryPolicy,
         kind: ResponseKind,
         options: RequestOptions | None,
+        multipart: MultipartParts | None = None,
     ) -> _Prepared:
         """Steps 1 to 4 of a request: closed check, effective values, building and validation, deadline."""
         if self._closed:
             raise RuntimeError(_CLOSED_MESSAGE)
+        if body is not None and multipart is not None:
+            raise ValueError(_BODY_AND_MULTIPART_MESSAGE)
         opts: Mapping[str, object] = {} if options is None else options
         given_timeout = opts.get("timeout")
         given_retries = opts.get("max_retries")
-        given_idle = opts.get("stream_idle_timeout")
         timeout = self._timeout if given_timeout is None else _check_timeout(given_timeout)
         max_retries = self._max_retries if given_retries is None else _check_max_retries(given_retries)
-        idle = self._stream_idle_timeout if given_idle is None else _check_idle_timeout(given_idle)
+        idle = self._effective_idle_timeout(options)
 
         target = self._build_url(path, url, query)
-        content = (
-            None
-            if body is None
-            else json.dumps(body, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-        )
+        content: bytes | None = None
+        content_type: str | None = None
+        if multipart is not None:
+            content, content_type = _encode_multipart(multipart)
+        elif body is not None:
+            content = json.dumps(body, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+            content_type = "application/json"
         extra = opts.get("extra_headers")
         headers = self._build_headers(
             kind=kind,
             extra_headers=None if extra is None else _as_header_source(extra),
             if_none_match=if_none_match,
             auth=auth,
-            json_body=content is not None,
+            content_type=content_type,
         )
         encoded = _encode_headers(headers)
         conditional = if_none_match is not None or (method == "GET" and "if-none-match" in headers)
@@ -546,10 +643,10 @@ class _BaseClient:
         extra_headers: Mapping[str, object] | None,
         if_none_match: str | None,
         auth: bool,
-        json_body: bool,
+        content_type: str | None,
     ) -> _HeaderMap:
         headers: _HeaderMap = {}
-        _set_header(headers, "Accept", "application/json" if kind == "json" else "*/*")
+        _set_header(headers, "Accept", _ACCEPT[kind])
         _set_header(headers, "User-Agent", USER_AGENT)
         _merge_headers(headers, self._default_headers)
         _merge_headers(headers, extra_headers)
@@ -559,8 +656,8 @@ class _BaseClient:
         headers.pop("content-type", None)
         if auth:
             _set_header(headers, "Authorization", f"Bearer {self._api_key}")
-        if json_body:
-            _set_header(headers, "Content-Type", "application/json")
+        if content_type is not None:
+            _set_header(headers, "Content-Type", content_type)
         return headers
 
     def _attempt_request(self, prepared: _Prepared) -> httpx.Request:
@@ -627,6 +724,18 @@ class _BaseClient:
 
     def _is_not_modified(self, prepared: _Prepared, response: httpx.Response) -> bool:
         return prepared.conditional and response.status_code == 304
+
+    def _open_stream(self, prepared: _Prepared, response: httpx.Response) -> None:
+        """After the headers of a ``"stream"`` response: from now on each read waits up to the idle timeout, or
+        without limit when it is off; the deadline of the call no longer applies.
+
+        The read timeout is the one the HTTP connection looks up when the body is read, so both clients apply it
+        there; on the async client the stream also bounds each read with ``anyio.move_on_after``, which covers a
+        transport that does not look the timeout up.
+        """
+        timeouts = response.request.extensions.get("timeout")
+        if isinstance(timeouts, dict):
+            cast("dict[str, float | None]", timeouts)["read"] = prepared.stream_idle_timeout
 
     def _parse(self, prepared: _Prepared, response: httpx.Response, content: bytes) -> APIResponse[Any]:
         text = _decode(content)
@@ -771,19 +880,26 @@ class DevupAI(_BaseClient):
         url: str | None = None,
         query: Mapping[str, str | None] | None = None,
         body: object = None,
+        multipart: MultipartParts | None = None,
         auth: bool = True,
         if_none_match: str | None = None,
         retry: RetryPolicy = DEFAULT_RETRY,
         kind: ResponseKind = "json",
         options: RequestOptions | None = None,
     ) -> APIResponse[Any]:
-        """Sends a request with retries inside one deadline and returns the parsed response."""
+        """Sends a request with retries inside one deadline and returns the parsed response.
+
+        ``body`` is sent as JSON, ``multipart`` as ``multipart/form-data`` (in the given order); passing both raises
+        ``ValueError``. For ``kind="raw"`` and ``kind="stream"`` the data is the ``httpx.Response`` with its body
+        unread, and the caller closes it. Nothing is sent again once the headers of a 2xx answer have arrived.
+        """
         prepared = self._prepare(
             method,
             path,
             url=url,
             query=query,
             body=body,
+            multipart=multipart,
             auth=auth,
             if_none_match=if_none_match,
             retry=retry,
@@ -805,9 +921,10 @@ class DevupAI(_BaseClient):
                 continue
 
             if self._is_not_modified(prepared, response):
-                if prepared.kind != "raw":
+                unread = prepared.kind in _UNREAD_KINDS
+                if not unread:
                     response.close()
-                return make_api_response(response if prepared.kind == "raw" else None, response)
+                return make_api_response(response if unread else None, response)
 
             if not response.is_success:
                 try:
@@ -829,6 +946,9 @@ class DevupAI(_BaseClient):
                 attempt += 1
                 continue
 
+            if prepared.kind == "stream":
+                self._open_stream(prepared, response)
+                return make_api_response(response, response)
             if prepared.kind == "raw":
                 return make_api_response(response, response)
             try:
@@ -927,19 +1047,26 @@ class AsyncDevupAI(_BaseClient):
         url: str | None = None,
         query: Mapping[str, str | None] | None = None,
         body: object = None,
+        multipart: MultipartParts | None = None,
         auth: bool = True,
         if_none_match: str | None = None,
         retry: RetryPolicy = DEFAULT_RETRY,
         kind: ResponseKind = "json",
         options: RequestOptions | None = None,
     ) -> APIResponse[Any]:
-        """Sends a request with retries inside one deadline and returns the parsed response."""
+        """Sends a request with retries inside one deadline and returns the parsed response, as
+        :meth:`DevupAI._request` does.
+
+        For ``kind="stream"`` the async stream applies the idle timeout itself: each read is bounded with
+        ``anyio.move_on_after`` (see :func:`effective_idle_timeout`).
+        """
         prepared = self._prepare(
             method,
             path,
             url=url,
             query=query,
             body=body,
+            multipart=multipart,
             auth=auth,
             if_none_match=if_none_match,
             retry=retry,
@@ -961,9 +1088,10 @@ class AsyncDevupAI(_BaseClient):
                 continue
 
             if self._is_not_modified(prepared, response):
-                if prepared.kind != "raw":
+                unread = prepared.kind in _UNREAD_KINDS
+                if not unread:
                     await response.aclose()
-                return make_api_response(response if prepared.kind == "raw" else None, response)
+                return make_api_response(response if unread else None, response)
 
             if not response.is_success:
                 try:
@@ -985,6 +1113,9 @@ class AsyncDevupAI(_BaseClient):
                 attempt += 1
                 continue
 
+            if prepared.kind == "stream":
+                self._open_stream(prepared, response)
+                return make_api_response(response, response)
             if prepared.kind == "raw":
                 return make_api_response(response, response)
             try:
@@ -1011,3 +1142,13 @@ def sync_request(client: DevupAI, *args: Any, **kwargs: Any) -> APIResponse[Any]
 async def async_request(client: AsyncDevupAI, *args: Any, **kwargs: Any) -> APIResponse[Any]:
     """The async twin of :func:`sync_request`, with the parameters of ``AsyncDevupAI._request``."""
     return await client._request(*args, **kwargs)  # pyright: ignore[reportPrivateUsage]
+
+
+def effective_idle_timeout(client: DevupAI | AsyncDevupAI, options: RequestOptions | None) -> float | None:
+    """The stream idle timeout of one call, in seconds, or ``None`` when it is off; used by the resources.
+
+    The ``stream_idle_timeout`` of ``options`` wins when it is given (``0`` turns it off); otherwise the client's
+    ``stream_idle_timeout`` applies. A value that is not valid raises ``TypeError`` or ``ValueError``. It is the
+    value ``_request(..., kind="stream")`` applies to the reads of the response.
+    """
+    return client._effective_idle_timeout(options)  # pyright: ignore[reportPrivateUsage]

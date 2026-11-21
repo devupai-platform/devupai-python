@@ -1,10 +1,11 @@
-"""The JSON resources of both clients: what each method sends and what it returns (contract §3).
+"""The resources of both clients: what each method sends and what it returns (contract §3, P3 contract §3-§4).
 
-Every implemented method of ``tests/helpers/samples.py`` is called once per client kind against the recording mock:
-the HTTP method, the exact URL, the headers, the JSON body (``extra_body`` merged last), the per-call ``timeout``,
-``max_retries`` and ``extra_headers``, the typed return model, and its ``with_response`` twin. Then the cases of one
-method each: conditional ``models`` requests, the ``health`` URL, the model path of ``inference.run``, and the
-attributes of the clients.
+Every method of ``tests/helpers/samples.py`` is called once per client kind against the recording mock: the HTTP
+method, the exact URL, the headers, the body (JSON with ``extra_body`` merged last, or the multipart parts of a form),
+the per-call ``timeout``, ``max_retries`` and ``extra_headers``, the typed return value (a model, or a
+``BinaryResponse`` with the file bytes), and its ``with_response`` twin. Then the cases of one method each:
+conditional ``models`` requests, the ``health`` URL, the model path of ``inference.run``, and the attributes of the
+clients.
 
 ``devupai.types`` and ``devupai.resources`` are imported inside the tests, so each test reports on its own while the
 package is incomplete.
@@ -30,7 +31,11 @@ from helpers.mock_transport import (
     sequence,
 )
 from helpers.samples import (
+    BINARY_CONTENT,
+    BINARY_CONTENT_TYPE,
+    FORM_POST_METHODS,
     IMPLEMENTED,
+    JSON_POST_METHODS,
     ORIGIN,
     RETURNS,
     SAMPLES,
@@ -38,13 +43,19 @@ from helpers.samples import (
     expected_body,
     invoke,
     method_of,
+    multipart_parts,
     resolve,
+    return_type,
+    sample_accept,
+    sample_response,
+    sample_url,
 )
 
 from devupai import APIResponse, AsyncDevupAI, DevupAI, DevupAPIError
 
 ETAG = '"fixture-etag"'
-IMPLEMENTED_POST = tuple(name for name in IMPLEMENTED if SAMPLES[name].http_method == "POST")
+#: The POST methods that send a JSON body and take ``extra_body`` (the multipart-only methods do not).
+IMPLEMENTED_POST = JSON_POST_METHODS
 CONDITIONAL = ("models.list", "models.retrieve")
 
 
@@ -142,6 +153,21 @@ def _check_inference(result: Any, t: Any) -> None:
     assert result == {"ok": True}
 
 
+def _check_transcription(result: Any, t: Any) -> None:
+    assert result.text == "Hello"
+    assert isinstance(result.devup, t.DevUpBilling)
+    assert result.devup.cost_dzd == 1.5
+
+
+def _check_binary(result: Any, t: Any) -> None:
+    # ``call_sample`` read the body inside the event loop, so the bytes are on the wrapped response.
+    assert isinstance(result.response, httpx.Response)
+    assert result.response.content == BINARY_CONTENT
+    assert result.status_code == 200
+    assert result.headers["content-type"] == BINARY_CONTENT_TYPE
+    assert result.request_id == REQ_ID
+
+
 def _check_balance(result: Any, t: Any) -> None:
     assert result.balance_dzd == 10.5
 
@@ -164,50 +190,60 @@ CHECKS: dict[str, Callable[[Any, Any], None]] = {
     "models.retrieve": _check_model,
     "images.generate": _check_image,
     "images.edit": _check_image,
+    "images.download": _check_binary,
     "embeddings.create": _check_embedding,
     "rerank.create": _check_rerank,
     "audio.speech.create": _check_speech,
+    "audio.transcriptions.create": _check_transcription,
     "video.generations.create": _check_video,
+    "video.edits.create": _check_video,
     "inference.run": _check_inference,
     "balance.retrieve": _check_balance,
     "me.retrieve": _check_me,
+    "me.avatar": _check_binary,
     "health.check": _check_health,
 }
 
 
 def test_the_tables_cover_every_implemented_method() -> None:
-    assert set(CHECKS) == set(RETURNS) == set(IMPLEMENTED)
+    assert set(CHECKS) == set(RETURNS) == set(IMPLEMENTED) == set(SAMPLES)
+    assert set(FORM_POST_METHODS) == {"audio.transcriptions.create", "video.edits.create"}
+    assert {name for name, sample in SAMPLES.items() if sample.binary} == {"images.download", "me.avatar"}
 
 
-def assert_return(name: str, result: Any) -> None:
+def assert_return(name: str, result: Any, client_kind: str) -> None:
     t = _types()
     type_name = RETURNS[name]
     if type_name is not None:
-        expected = getattr(t, type_name)
-        assert isinstance(result, expected), f"{name} returned {type(result).__name__}, not {type_name}"
+        expected = return_type(type_name, client_kind)
+        assert isinstance(result, expected), f"{name} returned {type(result).__name__}, not {expected.__name__}"
     CHECKS[name](result, t)
 
 
-# --- every implemented method -------------------------------------------------------------------------------------
+# --- every method -------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_sends_the_method_url_headers_and_body(client_kind: str, name: str) -> None:
     sample = SAMPLES[name]
-    api, _, client = setup(client_kind, json_response(sample.response))
+    api, _, client = setup(client_kind, sample_response(name))
     call_sample(client, name)
     assert len(api.calls) == 1
     request = api.calls[0]
     assert request.method == sample.http_method
-    assert request.url == ORIGIN + sample.path
-    if name == "health.check":
-        assert "authorization" not in request.headers
-    else:
+    assert request.url == sample_url(name)
+    if sample.auth:
         assert request.headers["authorization"] == f"Bearer {TEST_KEY}"
-    assert request.headers["accept"] == "application/json"
+    else:
+        assert name in ("health.check", "images.download")
+        assert "authorization" not in request.headers
+    assert request.headers["accept"] == sample_accept(name)
     assert "if-none-match" not in request.headers
     body = expected_body(name)
-    if body is None:
+    if sample.form is not None:
+        assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+        assert multipart_parts(request) == list(sample.form)
+    elif body is None:
         assert request.content == b""
         assert "content-type" not in request.headers
     else:
@@ -217,13 +253,13 @@ def test_sends_the_method_url_headers_and_body(client_kind: str, name: str) -> N
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_returns_the_typed_model(client_kind: str, name: str) -> None:
-    _, _, client = setup(client_kind, json_response(SAMPLES[name].response))
-    assert_return(name, call_sample(client, name))
+    _, _, client = setup(client_kind, sample_response(name))
+    assert_return(name, call_sample(client, name), client_kind)
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED_POST)
 def test_extra_body_is_merged_last_and_wins(client_kind: str, name: str) -> None:
-    api, _, client = setup(client_kind, json_response(SAMPLES[name].response))
+    api, _, client = setup(client_kind, sample_response(name))
     body = expected_body(name)
     assert body is not None
     first_key = next(iter(body))
@@ -236,17 +272,17 @@ def test_extra_body_is_merged_last_and_wins(client_kind: str, name: str) -> None
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_extra_headers_are_sent(client_kind: str, name: str) -> None:
-    api, _, client = setup(client_kind, json_response(SAMPLES[name].response))
+    api, _, client = setup(client_kind, sample_response(name))
     call_sample(client, name, extra_headers={"X-Fixture": "1", "X-Fixture-Two": "two"})
     headers = api.calls[0].headers
     assert headers["x-fixture"] == "1"
     assert headers["x-fixture-two"] == "two"
-    assert headers["accept"] == "application/json"
+    assert headers["accept"] == sample_accept(name)
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_per_call_timeout_sets_the_request_timeout(client_kind: str, name: str) -> None:
-    _, capture, client = setup(client_kind, json_response(SAMPLES[name].response))
+    _, capture, client = setup(client_kind, sample_response(name))
     call_sample(client, name, timeout=5.0)
     timeout = capture.requests[0].extensions["timeout"]
     assert timeout["read"] == 5.0
@@ -255,7 +291,7 @@ def test_per_call_timeout_sets_the_request_timeout(client_kind: str, name: str) 
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_without_a_timeout_the_client_timeout_applies(client_kind: str, name: str) -> None:
-    _, capture, client = setup(client_kind, json_response(SAMPLES[name].response), timeout=30.0)
+    _, capture, client = setup(client_kind, sample_response(name), timeout=30.0)
     call_sample(client, name)
     timeout = capture.requests[0].extensions["timeout"]
     assert timeout["read"] == 30.0
@@ -264,7 +300,7 @@ def test_without_a_timeout_the_client_timeout_applies(client_kind: str, name: st
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_max_retries_zero_sends_once(client_kind: str, name: str) -> None:
-    api, _, client = setup(client_kind, error_response(503), json_response(SAMPLES[name].response))
+    api, _, client = setup(client_kind, error_response(503), sample_response(name))
     with pytest.raises(DevupAPIError) as caught:
         call_sample(client, name, max_retries=0)
     assert caught.value.status == 503
@@ -273,28 +309,26 @@ def test_max_retries_zero_sends_once(client_kind: str, name: str) -> None:
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_max_retries_per_call_overrides_the_client(client_kind: str, name: str) -> None:
-    api, _, client = setup(
-        client_kind, error_response(503), error_response(503), json_response(SAMPLES[name].response), max_retries=0
-    )
-    assert_return(name, call_sample(client, name, max_retries=2))
+    api, _, client = setup(client_kind, error_response(503), error_response(503), sample_response(name), max_retries=0)
+    assert_return(name, call_sample(client, name, max_retries=2), client_kind)
     assert len(api.calls) == 3
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_with_response_returns_the_api_response(client_kind: str, name: str) -> None:
-    api, _, client = setup(client_kind, json_response(SAMPLES[name].response))
+    api, _, client = setup(client_kind, sample_response(name))
     result = call_sample(client, name, with_response=True)
     assert isinstance(result, APIResponse)
-    assert_return(name, result.data)
+    assert_return(name, result.data, client_kind)
     assert result.request_id == REQ_ID
     assert result.response.status_code == 200
     assert len(api.calls) == 1
-    assert api.calls[0].url == ORIGIN + SAMPLES[name].path
+    assert api.calls[0].url == sample_url(name)
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED_POST)
 def test_with_response_takes_the_same_options(client_kind: str, name: str) -> None:
-    api, capture, client = setup(client_kind, json_response(SAMPLES[name].response))
+    api, capture, client = setup(client_kind, sample_response(name))
     body = expected_body(name)
     assert body is not None
     result = call_sample(
@@ -304,6 +338,61 @@ def test_with_response_takes_the_same_options(client_kind: str, name: str) -> No
     assert api.calls[0].json() == {**body, "fixture_extra": 1}
     assert api.calls[0].headers["x-fixture"] == "1"
     assert capture.requests[0].extensions["timeout"]["read"] == 7.0
+
+
+# --- the multipart-only methods (Node's fixed field lists) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_response", [False, True], ids=["plain", "with_response"])
+@pytest.mark.parametrize("name", FORM_POST_METHODS)
+def test_form_methods_take_the_common_options(client_kind: str, name: str, with_response: bool) -> None:
+    api, capture, client = setup(client_kind, sample_response(name))
+    result = call_sample(client, name, with_response=with_response, extra_headers={"X-Fixture": "1"}, timeout=7.0)
+    assert isinstance(result, APIResponse) is with_response
+    assert len(api.calls) == 1
+    assert multipart_parts(api.calls[0]) == list(SAMPLES[name].form or ())
+    assert api.calls[0].headers["x-fixture"] == "1"
+    assert capture.requests[0].extensions["timeout"]["read"] == 7.0
+
+
+@pytest.mark.parametrize(
+    "extra", [{"fixture_extra": "x"}, {"extra_body": {"fixture_extra_body": 1}}], ids=["field", "extra_body"]
+)
+@pytest.mark.parametrize("name", FORM_POST_METHODS)
+def test_form_methods_send_only_their_listed_fields(client_kind: str, name: str, extra: dict[str, object]) -> None:
+    # Node sends only its fixed list. In Python these methods take explicit keyword-only parameters (lead decision
+    # in P3, matching tests/test_multipart.py): a field outside the list, or ``extra_body``, is a TypeError and
+    # nothing is sent; the listed fields alone make up the form.
+    api, _, client = setup(client_kind, sample_response(name))
+    with pytest.raises(TypeError):
+        call_sample(client, name, **extra)
+    assert api.calls == []
+    call_sample(client, name)
+    assert multipart_parts(api.calls[0]) == list(SAMPLES[name].form or ())
+
+
+# --- images.download: no key, and only the API's own origin ---------------------------------------------------------
+
+
+def test_images_download_never_sends_authorization_even_from_extra_headers(client_kind: str) -> None:
+    api, _, client = setup(client_kind, sample_response("images.download"))
+    call_sample(client, "images.download", extra_headers={"Authorization": "Bearer per-call", "X-Fixture": "1"})
+    assert "authorization" not in api.calls[0].headers
+    assert api.calls[0].headers["x-fixture"] == "1"
+    assert api.calls[0].url == sample_url("images.download")
+
+
+def test_images_download_refuses_another_origin_before_any_request(client_kind: str) -> None:
+    api, _, client = setup(client_kind, sample_response("images.download"))
+    foreign = "https://cdn.example.test/fixture.png"
+    with pytest.raises(DevupAPIError) as caught:
+        invoke(method_of(client, "images.download"), foreign)
+    assert type(caught.value) is DevupAPIError
+    assert caught.value.status == 0
+    assert caught.value.code == "invalid_url"
+    assert caught.value.message == "images.download only fetches URLs returned by the API."
+    assert foreign not in str(caught.value)
+    assert api.calls == []
 
 
 # --- conditional requests on models --------------------------------------------------------------------------------
@@ -321,7 +410,7 @@ def test_if_none_match_is_sent_and_304_returns_none(client_kind: str, name: str)
 @pytest.mark.parametrize("name", CONDITIONAL)
 def test_if_none_match_that_no_longer_matches_returns_the_model(client_kind: str, name: str) -> None:
     api, _, client = setup(client_kind, json_response(SAMPLES[name].response, headers={"etag": ETAG}))
-    assert_return(name, call_sample(client, name, if_none_match='"fixture-old-etag"'))
+    assert_return(name, call_sample(client, name, if_none_match='"fixture-old-etag"'), client_kind)
     assert api.calls[0].headers["if-none-match"] == '"fixture-old-etag"'
 
 
@@ -368,7 +457,7 @@ def test_a_304_without_if_none_match_raises(client_kind: str, name: str) -> None
 )
 def test_health_url_is_next_to_the_versioned_path(client_kind: str, base_url: str, expected: str) -> None:
     api, _, client = setup(client_kind, json_response({"status": "ok"}), base_url=base_url)
-    assert_return("health.check", invoke(method_of(client, "health.check")))
+    assert_return("health.check", invoke(method_of(client, "health.check")), client_kind)
     assert api.calls[0].url == expected
     assert api.calls[0].method == "GET"
 

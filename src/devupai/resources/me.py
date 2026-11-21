@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import NoReturn
 
-from devupai._response import APIResponse
+from devupai._response import APIResponse, AsyncBinaryResponse, BinaryResponse
 from devupai.resources._base import (
-    NOT_IMPLEMENTED_MESSAGE,
     AsyncAPIResource,
     SyncAPIResource,
     endpoint,
@@ -48,9 +46,16 @@ class MeWithResponse(SyncAPIResource):
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-    ) -> NoReturn:
-        """Fetches the account's profile picture. Available in a later build: raises ``NotImplementedError``."""
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+    ) -> APIResponse[BinaryResponse]:
+        """Fetches the account's profile picture; see :meth:`Me.avatar`."""
+        response = self._send(
+            "GET",
+            _AVATAR_PATH,
+            if_none_match=if_none_match,
+            kind="raw",
+            options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
+        )
+        return with_data(response, BinaryResponse(response.response))
 
 
 class Me(SyncAPIResource):
@@ -87,12 +92,24 @@ class Me(SyncAPIResource):
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-    ) -> NoReturn:
-        """Fetches the account's profile picture.
+    ) -> BinaryResponse:
+        """Fetches the account's profile picture, as a :class:`~devupai.BinaryResponse` with its body not read yet.
 
-        Available in a later build: raises ``NotImplementedError`` before anything is sent.
+        Read the ``content-type`` and ``etag`` headers, and the bytes with ``read()``. With ``if_none_match`` set to
+        the ``etag`` of a copy you already have (from :meth:`retrieve` or an earlier ``ETag`` header), an unchanged
+        picture gives a result with ``status_code == 304`` and an empty body instead of the bytes.
+
+        An account without a picture raises :class:`~devupai.NotFoundError` (code ``avatar_not_found``).
+
+        Example::
+
+            with client.me.avatar() as avatar:
+                data = avatar.read()
+                etag = avatar.headers.get("etag")
         """
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+        return self.with_response.avatar(
+            if_none_match=if_none_match, extra_headers=extra_headers, timeout=timeout, max_retries=max_retries
+        ).data
 
 
 class AsyncMeWithResponse(AsyncAPIResource):
@@ -120,9 +137,16 @@ class AsyncMeWithResponse(AsyncAPIResource):
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-    ) -> NoReturn:
-        """Fetches the account's profile picture. Available in a later build: raises ``NotImplementedError``."""
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+    ) -> APIResponse[AsyncBinaryResponse]:
+        """Fetches the account's profile picture; see :meth:`AsyncMe.avatar`."""
+        response = await self._send(
+            "GET",
+            _AVATAR_PATH,
+            if_none_match=if_none_match,
+            kind="raw",
+            options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
+        )
+        return with_data(response, AsyncBinaryResponse(response.response))
 
 
 class AsyncMe(AsyncAPIResource):
@@ -162,9 +186,23 @@ class AsyncMe(AsyncAPIResource):
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-    ) -> NoReturn:
-        """Fetches the account's profile picture.
+    ) -> AsyncBinaryResponse:
+        """Fetches the account's profile picture, as an :class:`~devupai.AsyncBinaryResponse` with its body not read
+        yet.
 
-        Available in a later build: raises ``NotImplementedError`` before anything is sent.
+        Read the ``content-type`` and ``etag`` headers, and the bytes with ``await read()``. With ``if_none_match``
+        set to the ``etag`` of a copy you already have (from :meth:`retrieve` or an earlier ``ETag`` header), an
+        unchanged picture gives a result with ``status_code == 304`` and an empty body instead of the bytes.
+
+        An account without a picture raises :class:`~devupai.NotFoundError` (code ``avatar_not_found``).
+
+        Example::
+
+            async with await client.me.avatar() as avatar:
+                data = await avatar.read()
+                etag = avatar.headers.get("etag")
         """
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+        response = await self.with_response.avatar(
+            if_none_match=if_none_match, extra_headers=extra_headers, timeout=timeout, max_retries=max_retries
+        )
+        return response.data

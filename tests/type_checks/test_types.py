@@ -1,20 +1,31 @@
 """Return types of every public method, on both clients and on every ``with_response`` twin.
 
-``mypy --strict`` and ``pyright`` strict read this module. ``_check_sync`` and ``_check_async`` are never called:
-``assert_type`` is checked statically only. ``test_typing_module_imports`` is the one test that runs, so pytest
-imports the module.
+``mypy --strict`` and ``pyright`` strict read this module. ``_check_sync``, ``_check_async`` and their P3 twins
+(streams, transcriptions by ``response_format``, video edits and binary results) are never called: ``assert_type`` is
+checked statically only. ``test_typing_module_imports`` is the one test that runs, so pytest imports the module.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import assert_type
+from typing import Literal, assert_type
 
-from devupai import APIResponse, AsyncDevupAI, DevupAI, construct_webhook_event, verify_webhook_signature
+from devupai import (
+    APIResponse,
+    AsyncBinaryResponse,
+    AsyncDevupAI,
+    AsyncStream,
+    BinaryResponse,
+    DevupAI,
+    Stream,
+    construct_webhook_event,
+    verify_webhook_signature,
+)
 from devupai.types import (
     AccountProfile,
     BalanceResponse,
     ChatCompletion,
+    ChatCompletionChunk,
     EmbeddingCreateResponse,
     HealthResponse,
     ImageGenerateResponse,
@@ -22,7 +33,10 @@ from devupai.types import (
     ModelObject,
     RerankCreateResponse,
     ResponseObject,
+    ResponseStreamEvent,
     SpeechResponse,
+    TranscriptionResponse,
+    TranscriptionVerboseResponse,
     VideoGenerationResponse,
     WebhookEvent,
 )
@@ -32,11 +46,275 @@ ETAG = 'W/"fixture-etag"'
 BODY = '{"id": "whd_1", "status": "succeeded"}'
 HEADER = "t=1800000000,v1=00"
 SECRET = "whsec_fixture"
+AUDIO = b"\x00\x01"
+DOWNLOAD_URL = "https://api.example.test/v1/images/proxy?url=x"
+
+TranscriptionFormat = Literal["json", "verbose_json", "text", "srt", "vtt"]
 
 
 def _etag_or_none() -> str | None:
     """An ``If-None-Match`` value whose static type is ``str | None``."""
     return None
+
+
+def _flag() -> bool:
+    """A ``stream`` value whose static type is ``bool`` (neither literal)."""
+    return False
+
+
+def _any_format() -> TranscriptionFormat:
+    """A ``response_format`` value whose static type is the whole literal union."""
+    return "json"
+
+
+def _check_sync_p3(client: DevupAI) -> None:
+    """P3: streams, transcriptions, video edits and binary results (sync client)."""
+    flag = _flag()
+    fmt = _any_format()
+
+    # chat.completions: the stream overloads
+    assert_type(
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True),
+        Stream[ChatCompletionChunk],
+    )
+    assert_type(
+        client.chat.completions.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True, stream_idle_timeout=5.0
+        ),
+        Stream[ChatCompletionChunk],
+    )
+    assert_type(
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=False),
+        ChatCompletion,
+    )
+    assert_type(
+        client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=flag),
+        ChatCompletion | Stream[ChatCompletionChunk],
+    )
+    assert_type(
+        client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True
+        ),
+        APIResponse[Stream[ChatCompletionChunk]],
+    )
+    assert_type(
+        client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=False
+        ),
+        APIResponse[ChatCompletion],
+    )
+    assert_type(
+        client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=flag
+        ),
+        APIResponse[ChatCompletion | Stream[ChatCompletionChunk]],
+    )
+    chat_stream = client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True)
+    assert_type(chat_stream.request_id, str | None)
+    assert_type(chat_stream.warnings, list[str])
+    with chat_stream as opened:
+        for chunk in opened:
+            assert_type(chunk, ChatCompletionChunk)
+    assert_type(chat_stream.close(), None)
+
+    # responses: the stream overloads
+    assert_type(client.responses.create(model=MODEL, input="Hi", stream=True), Stream[ResponseStreamEvent])
+    assert_type(
+        client.responses.create(model=MODEL, input="Hi", stream=True, stream_idle_timeout=None),
+        Stream[ResponseStreamEvent],
+    )
+    assert_type(client.responses.create(model=MODEL, input="Hi", stream=False), ResponseObject)
+    assert_type(
+        client.responses.create(model=MODEL, input="Hi", stream=flag), ResponseObject | Stream[ResponseStreamEvent]
+    )
+    assert_type(
+        client.responses.with_response.create(model=MODEL, input="Hi", stream=True),
+        APIResponse[Stream[ResponseStreamEvent]],
+    )
+    assert_type(
+        client.responses.with_response.create(model=MODEL, input="Hi", stream=False), APIResponse[ResponseObject]
+    )
+    assert_type(
+        client.responses.with_response.create(model=MODEL, input="Hi", stream=flag),
+        APIResponse[ResponseObject | Stream[ResponseStreamEvent]],
+    )
+    for event in client.responses.create(model=MODEL, input="Hi", stream=True):
+        assert_type(event, ResponseStreamEvent)
+
+    # audio.transcriptions: the response_format overloads
+    assert_type(client.audio.transcriptions.create(file=AUDIO, model=MODEL), TranscriptionResponse)
+    assert_type(client.audio.transcriptions.create(file=AUDIO, response_format="json"), TranscriptionResponse)
+    assert_type(
+        client.audio.transcriptions.create(file=AUDIO, response_format="verbose_json"), TranscriptionVerboseResponse
+    )
+    assert_type(client.audio.transcriptions.create(file=AUDIO, response_format="text"), str)
+    assert_type(client.audio.transcriptions.create(file=AUDIO, response_format="srt"), str)
+    assert_type(client.audio.transcriptions.create(file=AUDIO, response_format="vtt"), str)
+    assert_type(
+        client.audio.transcriptions.create(file=AUDIO, response_format=fmt),
+        TranscriptionResponse | TranscriptionVerboseResponse | str,
+    )
+    assert_type(
+        client.audio.transcriptions.create(
+            file=AUDIO, timestamp_granularities=["word"], extra_headers={"X-Fixture": "1"}, timeout=5.0, max_retries=0
+        ),
+        TranscriptionResponse,
+    )
+    assert_type(client.audio.transcriptions.with_response.create(file=AUDIO), APIResponse[TranscriptionResponse])
+    assert_type(
+        client.audio.transcriptions.with_response.create(file=AUDIO, response_format="verbose_json"),
+        APIResponse[TranscriptionVerboseResponse],
+    )
+    assert_type(client.audio.transcriptions.with_response.create(file=AUDIO, response_format="text"), APIResponse[str])
+
+    # video.edits
+    assert_type(client.video.edits.create(model=MODEL, video=AUDIO), VideoGenerationResponse)
+    assert_type(
+        client.video.edits.create(
+            model=MODEL, video=AUDIO, mask=AUDIO, key_points=[{"x": 0.5, "y": 0.5, "type": "positive"}]
+        ),
+        VideoGenerationResponse,
+    )
+    assert_type(client.video.edits.with_response.create(model=MODEL, video=AUDIO), APIResponse[VideoGenerationResponse])
+
+    # binary results
+    assert_type(client.images.download(DOWNLOAD_URL), BinaryResponse)
+    assert_type(client.images.download(DOWNLOAD_URL, extra_headers={"Range": "bytes=0-1"}), BinaryResponse)
+    assert_type(client.images.with_response.download(DOWNLOAD_URL), APIResponse[BinaryResponse])
+    assert_type(client.me.avatar(), BinaryResponse)
+    assert_type(client.me.avatar(if_none_match=ETAG), BinaryResponse)
+    assert_type(client.me.with_response.avatar(), APIResponse[BinaryResponse])
+    assert_type(client.inference.run(MODEL, {"inputs": "Hi"}, response_type="binary"), BinaryResponse)
+    assert_type(client.inference.run(MODEL, {"inputs": "Hi"}, response_type="json"), object)
+    assert_type(
+        client.inference.with_response.run(MODEL, {"inputs": "Hi"}, response_type="binary"), APIResponse[BinaryResponse]
+    )
+    binary = client.images.download(DOWNLOAD_URL)
+    assert_type(binary.read(), bytes)
+    assert_type(binary.status_code, int)
+    assert_type(binary.request_id, str | None)
+    for piece in binary.iter_bytes():
+        assert_type(piece, bytes)
+    assert_type(binary.write_to_file("fixture.png"), None)
+    with client.me.avatar() as avatar:
+        assert_type(avatar, BinaryResponse)
+
+
+async def _check_async_p3(client: AsyncDevupAI) -> None:
+    """P3: streams, transcriptions, video edits and binary results (async client)."""
+    flag = _flag()
+    fmt = _any_format()
+
+    # chat.completions: the stream overloads
+    assert_type(
+        await client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True),
+        AsyncStream[ChatCompletionChunk],
+    )
+    assert_type(
+        await client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=False),
+        ChatCompletion,
+    )
+    assert_type(
+        await client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=flag),
+        ChatCompletion | AsyncStream[ChatCompletionChunk],
+    )
+    assert_type(
+        await client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True
+        ),
+        APIResponse[AsyncStream[ChatCompletionChunk]],
+    )
+    assert_type(
+        await client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=False
+        ),
+        APIResponse[ChatCompletion],
+    )
+    assert_type(
+        await client.chat.completions.with_response.create(
+            model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=flag
+        ),
+        APIResponse[ChatCompletion | AsyncStream[ChatCompletionChunk]],
+    )
+    chat_stream = await client.chat.completions.create(
+        model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True, stream_idle_timeout=5.0
+    )
+    assert_type(chat_stream.request_id, str | None)
+    async with chat_stream as opened:
+        async for chunk in opened:
+            assert_type(chunk, ChatCompletionChunk)
+    assert_type(await chat_stream.close(), None)
+
+    # responses: the stream overloads
+    assert_type(await client.responses.create(model=MODEL, input="Hi", stream=True), AsyncStream[ResponseStreamEvent])
+    assert_type(await client.responses.create(model=MODEL, input="Hi", stream=False), ResponseObject)
+    assert_type(
+        await client.responses.create(model=MODEL, input="Hi", stream=flag),
+        ResponseObject | AsyncStream[ResponseStreamEvent],
+    )
+    assert_type(
+        await client.responses.with_response.create(model=MODEL, input="Hi", stream=True),
+        APIResponse[AsyncStream[ResponseStreamEvent]],
+    )
+    assert_type(
+        await client.responses.with_response.create(model=MODEL, input="Hi", stream=False), APIResponse[ResponseObject]
+    )
+    assert_type(
+        await client.responses.with_response.create(model=MODEL, input="Hi", stream=flag),
+        APIResponse[ResponseObject | AsyncStream[ResponseStreamEvent]],
+    )
+    async for event in await client.responses.create(model=MODEL, input="Hi", stream=True):
+        assert_type(event, ResponseStreamEvent)
+
+    # audio.transcriptions: the response_format overloads
+    assert_type(await client.audio.transcriptions.create(file=AUDIO, model=MODEL), TranscriptionResponse)
+    assert_type(await client.audio.transcriptions.create(file=AUDIO, response_format="json"), TranscriptionResponse)
+    assert_type(
+        await client.audio.transcriptions.create(file=AUDIO, response_format="verbose_json"),
+        TranscriptionVerboseResponse,
+    )
+    assert_type(await client.audio.transcriptions.create(file=AUDIO, response_format="text"), str)
+    assert_type(await client.audio.transcriptions.create(file=AUDIO, response_format="srt"), str)
+    assert_type(await client.audio.transcriptions.create(file=AUDIO, response_format="vtt"), str)
+    assert_type(
+        await client.audio.transcriptions.create(file=AUDIO, response_format=fmt),
+        TranscriptionResponse | TranscriptionVerboseResponse | str,
+    )
+    assert_type(await client.audio.transcriptions.with_response.create(file=AUDIO), APIResponse[TranscriptionResponse])
+    assert_type(
+        await client.audio.transcriptions.with_response.create(file=AUDIO, response_format="verbose_json"),
+        APIResponse[TranscriptionVerboseResponse],
+    )
+    assert_type(
+        await client.audio.transcriptions.with_response.create(file=AUDIO, response_format="text"), APIResponse[str]
+    )
+
+    # video.edits
+    assert_type(await client.video.edits.create(model=MODEL, video=AUDIO), VideoGenerationResponse)
+    assert_type(
+        await client.video.edits.with_response.create(model=MODEL, video=AUDIO), APIResponse[VideoGenerationResponse]
+    )
+
+    # binary results
+    assert_type(await client.images.download(DOWNLOAD_URL), AsyncBinaryResponse)
+    assert_type(await client.images.with_response.download(DOWNLOAD_URL), APIResponse[AsyncBinaryResponse])
+    assert_type(await client.me.avatar(), AsyncBinaryResponse)
+    assert_type(await client.me.avatar(if_none_match=ETAG), AsyncBinaryResponse)
+    assert_type(await client.me.with_response.avatar(), APIResponse[AsyncBinaryResponse])
+    assert_type(await client.inference.run(MODEL, {"inputs": "Hi"}, response_type="binary"), AsyncBinaryResponse)
+    assert_type(await client.inference.run(MODEL, {"inputs": "Hi"}, response_type="json"), object)
+    assert_type(
+        await client.inference.with_response.run(MODEL, {"inputs": "Hi"}, response_type="binary"),
+        APIResponse[AsyncBinaryResponse],
+    )
+    binary = await client.images.download(DOWNLOAD_URL)
+    assert_type(await binary.read(), bytes)
+    assert_type(binary.status_code, int)
+    async for piece in binary.aiter_bytes():
+        assert_type(piece, bytes)
+    assert_type(await binary.write_to_file("fixture.png"), None)
+    async with await client.me.avatar() as avatar:
+        assert_type(avatar, AsyncBinaryResponse)
 
 
 def _check_sync(client: DevupAI) -> None:
@@ -250,4 +528,10 @@ async def _check_async(client: AsyncDevupAI) -> None:
 def test_typing_module_imports() -> None:
     assert callable(_check_sync)
     assert inspect.iscoroutinefunction(_check_async)
+    assert callable(_check_sync_p3)
+    assert inspect.iscoroutinefunction(_check_async_p3)
     assert _etag_or_none() is None
+    assert _flag() is False
+    assert _any_format() == "json"
+    for name in (Stream, AsyncStream, BinaryResponse, AsyncBinaryResponse):
+        assert isinstance(name, type)

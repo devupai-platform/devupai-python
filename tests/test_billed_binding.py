@@ -21,6 +21,8 @@ from helpers.samples import (
     SAMPLES,
     call_sample,
     discover,
+    sample_kind,
+    sample_response,
     split_name,
 )
 
@@ -133,17 +135,20 @@ def _expected_policy(name: str) -> Any:
 def test_the_request_entry_receives_the_bound_policy(
     monkeypatch: pytest.MonkeyPatch, client_kind: str, name: str, with_response: bool
 ) -> None:
-    _, client = make_client(client_kind, json_response(SAMPLES[name].response))
+    _, client = make_client(client_kind, sample_response(name))
     captured = spy_request(monkeypatch, client)
     call_sample(client, name, with_response=with_response)
     assert len(captured) == 1, f"{name} did not send through the client's request entry exactly once"
     assert captured[0].get("retry") == _expected_policy(name)
-    assert captured[0].get("auth", True) is (name != "health.check")
+    # The key is left out for health and for images.download (Node's rule); every other method sends it.
+    assert captured[0].get("auth", True) is SAMPLES[name].auth
+    assert captured[0].get("auth", True) is (name not in ("health.check", "images.download"))
+    assert captured[0].get("kind", "json") == sample_kind(name)
 
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_a_502_is_sent_again_only_for_get(client_kind: str, name: str) -> None:
-    api, client = make_client(client_kind, error_response(502), json_response(SAMPLES[name].response))
+    api, client = make_client(client_kind, error_response(502), sample_response(name))
     if name in BILLED_POST_METHODS:
         with pytest.raises(DevupAPIError) as caught:
             call_sample(client, name)
@@ -156,13 +161,17 @@ def test_a_502_is_sent_again_only_for_get(client_kind: str, name: str) -> None:
 
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_a_503_is_sent_again_on_both_policies(client_kind: str, name: str) -> None:
-    api, client = make_client(client_kind, error_response(503), json_response(SAMPLES[name].response))
+    api, client = make_client(client_kind, error_response(503), sample_response(name))
     call_sample(client, name)
     assert len(api.calls) == 2
 
 
 def test_every_billed_method_has_a_policy_check() -> None:
-    # The NIE methods are bound by metadata only in this build; every other billed method is called above.
-    not_called = sorted(BILLED_POST_METHODS - set(IMPLEMENTED))
-    assert not_called == ["audio.transcriptions.create", "video.edits.create"]
-    assert sorted(GET_METHODS - set(IMPLEMENTED)) == ["images.download", "me.avatar"]
+    # No method is bound by metadata only any more (P3 removed the placeholders): every billed POST and every GET
+    # is called by the policy tests above.
+    assert sorted(BILLED_POST_METHODS - set(IMPLEMENTED)) == []
+    assert sorted(GET_METHODS - set(IMPLEMENTED)) == []
+    assert set(IMPLEMENTED) == BILLED_POST_METHODS | GET_METHODS
+    assert len(IMPLEMENTED) == 18
+    for name in ("audio.transcriptions.create", "video.edits.create", "images.download", "me.avatar"):
+        assert name in IMPLEMENTED, name

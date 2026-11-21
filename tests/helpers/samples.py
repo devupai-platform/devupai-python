@@ -1,9 +1,10 @@
 """One sample call per public API method of the client (contract §6).
 
-Each entry gives minimal arguments with synthetic ids, the request the SDK is expected to send (HTTP method and the
-URL path after the host, exactly as sent), and a minimal JSON body that is valid for the return model. Methods that
-raise ``NotImplementedError`` in this build are marked ``not_implemented=True``; their ``path`` is still the path the
-method stands for, so the endpoint tests can check it against the spec.
+Each entry gives minimal arguments with synthetic ids, the request the SDK is expected to send (HTTP method, the URL
+path after the host exactly as sent, the query of an absolute URL, the multipart parts of a form, whether the key is
+sent), and a minimal answer that is valid for the return type: a JSON body, or the bytes of a file for a method that
+returns a ``BinaryResponse``. Every method sends a request in this build; none is a placeholder any more (P3
+contract §6).
 
 This module never imports ``devupai`` at module level: the tests that use it are collected even when the package is
 incomplete.
@@ -13,16 +14,45 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import anyio
+import httpx
 
-from helpers.mock_transport import MODEL_A
+from helpers.mock_transport import MODEL_A, REQ_ID, RecordedRequest, json_response
 
 #: Scheme and host of ``helpers.mock_transport.BASE``; a full request URL is ``ORIGIN + Sample.path``.
 ORIGIN = "https://api.example.test"
+
+#: The bytes of the file a binary sample answers with, and their content type.
+BINARY_CONTENT = b"\x89PNG\r\n\x1a\nfixture-bytes"
+BINARY_CONTENT_TYPE = "image/png"
+
+#: The content type of a file part sent without one.
+OCTET_STREAM = "application/octet-stream"
+
+
+@dataclass(frozen=True)
+class Part:
+    """One part of a ``multipart/form-data`` body: a text part has no filename and no content type."""
+
+    name: str
+    filename: str | None
+    content_type: str | None
+    content: bytes
+
+
+def text_part(name: str, value: str) -> Part:
+    """A text part."""
+    return Part(name, None, None, value.encode("utf-8"))
+
+
+def file_part(name: str, content: bytes, filename: str = "upload", content_type: str = OCTET_STREAM) -> Part:
+    """A file part (default filename ``upload``, decision Q19)."""
+    return Part(name, filename, content_type, content)
 
 
 @dataclass(frozen=True)
@@ -33,8 +63,11 @@ class Sample:
     kwargs: dict[str, object]
     http_method: str
     path: str  # as sent: the URL path after the host, e.g. "/v1/models/fixture%2Fmodel-a", "/health"
-    response: object  # a minimal JSON body valid for the return model
-    not_implemented: bool = False
+    response: object  # a minimal JSON body valid for the return model, or the file bytes when ``binary``
+    query: str = ""  # the query sent, without "?" (an absolute URL given whole)
+    binary: bool = False  # the method returns a ``BinaryResponse`` (``kind="raw"``)
+    form: tuple[Part, ...] | None = None  # the multipart parts sent, in order (``None``: JSON or no body)
+    auth: bool = True  # the key is sent
 
 
 _BILLING: dict[str, object] = {"cost_dzd": 1.5, "balance_dzd": 98.5}
@@ -56,6 +89,8 @@ IMAGE_RESPONSE: dict[str, object] = {
     "data": [{"url": "https://cdn.example.test/fixture.png"}],
     "_devup": _BILLING,
 }
+
+VIDEO_RESPONSE: dict[str, object] = {"data": [{"url": "https://cdn.example.test/fixture.mp4"}], "_devup": _BILLING}
 
 SAMPLES: dict[str, Sample] = {
     "chat.completions.create": Sample(
@@ -117,12 +152,15 @@ SAMPLES: dict[str, Sample] = {
         response=IMAGE_RESPONSE,
     ),
     "images.download": Sample(
+        # An absolute URL with the same origin as the base URL (Node's rule): sent byte-exact, without the key.
         args=("https://api.example.test/v1/images/proxy?url=https%3A%2F%2Fcdn.example.test%2Ffixture.png",),
         kwargs={},
         http_method="GET",
         path="/v1/images/proxy",
-        response=None,
-        not_implemented=True,
+        query="url=https%3A%2F%2Fcdn.example.test%2Ffixture.png",
+        response=BINARY_CONTENT,
+        binary=True,
+        auth=False,
     ),
     "embeddings.create": Sample(
         args=(),
@@ -156,26 +194,28 @@ SAMPLES: dict[str, Sample] = {
     ),
     "audio.transcriptions.create": Sample(
         args=(),
+        # Given model first: the parts still follow Node's order, file first.
         kwargs={"model": MODEL_A, "file": b"\x00\x01"},
         http_method="POST",
         path="/v1/audio/transcriptions",
-        response={"text": "Hello"},
-        not_implemented=True,
+        response={"text": "Hello", "_devup": _BILLING},
+        form=(file_part("file", b"\x00\x01"), text_part("model", MODEL_A)),
     ),
     "video.generations.create": Sample(
         args=(),
         kwargs={"model": MODEL_A, "prompt": "A slow pan"},
         http_method="POST",
         path="/v1/video/generations",
-        response={"data": [{"url": "https://cdn.example.test/fixture.mp4"}], "_devup": _BILLING},
+        response=VIDEO_RESPONSE,
     ),
     "video.edits.create": Sample(
         args=(),
+        # Given model first: the parts still follow Node's fixed list, video first.
         kwargs={"model": MODEL_A, "video": b"\x00\x01"},
         http_method="POST",
         path="/v1/video/generations",
-        response={"data": [{"url": "https://cdn.example.test/fixture.mp4"}], "_devup": _BILLING},
-        not_implemented=True,
+        response=VIDEO_RESPONSE,
+        form=(file_part("video", b"\x00\x01"), text_part("model", MODEL_A)),
     ),
     "inference.run": Sample(
         args=("/fixture/model-a", {"inputs": "hello"}),
@@ -209,8 +249,8 @@ SAMPLES: dict[str, Sample] = {
         kwargs={},
         http_method="GET",
         path="/v1/me/avatar",
-        response=None,
-        not_implemented=True,
+        response=BINARY_CONTENT,
+        binary=True,
     ),
     "health.check": Sample(
         args=(),
@@ -218,6 +258,7 @@ SAMPLES: dict[str, Sample] = {
         http_method="GET",
         path="/health",
         response={"status": "ok"},
+        auth=False,
     ),
 }
 
@@ -251,13 +292,11 @@ GET_METHODS: frozenset[str] = frozenset(
     }
 )
 
-#: The methods that always raise ``NotImplementedError`` in this build.
-NOT_IMPLEMENTED: frozenset[str] = frozenset(name for name, sample in SAMPLES.items() if sample.not_implemented)
+#: The methods that send a request in this build: all of them (P3 removed the placeholders).
+IMPLEMENTED: tuple[str, ...] = tuple(SAMPLES)
 
-#: The methods that send a request in this build.
-IMPLEMENTED: tuple[str, ...] = tuple(name for name, sample in SAMPLES.items() if not sample.not_implemented)
-
-#: The return model of each implemented method, by its name in ``devupai.types`` (``None``: plain parsed JSON).
+#: The return type of each method, by its name in ``devupai.types`` or ``devupai`` (``None``: plain parsed JSON).
+#: ``BinaryResponse`` is ``AsyncBinaryResponse`` on the async client (see :func:`return_type`).
 RETURNS: dict[str, str | None] = {
     "chat.completions.create": "ChatCompletion",
     "responses.create": "ResponseObject",
@@ -265,27 +304,124 @@ RETURNS: dict[str, str | None] = {
     "models.retrieve": "ModelObject",
     "images.generate": "ImageGenerateResponse",
     "images.edit": "ImageGenerateResponse",
+    "images.download": "BinaryResponse",
     "embeddings.create": "EmbeddingCreateResponse",
     "rerank.create": "RerankCreateResponse",
     "audio.speech.create": "SpeechResponse",
+    "audio.transcriptions.create": "TranscriptionResponse",
     "video.generations.create": "VideoGenerationResponse",
+    "video.edits.create": "VideoGenerationResponse",
     "inference.run": None,
     "balance.retrieve": "BalanceResponse",
     "me.retrieve": "AccountProfile",
+    "me.avatar": "BinaryResponse",
     "health.check": "HealthResponse",
 }
 
+#: Return types that have an ``Async`` twin on the async client.
+ASYNC_TWIN_TYPES: frozenset[str] = frozenset({"Stream", "BinaryResponse"})
+
+
+def return_type(type_name: str, client_kind: str) -> type[Any]:
+    """The class named ``type_name`` (``Async`` + name for a stream or binary result on the async client)."""
+    if client_kind == "async" and type_name in ASYNC_TWIN_TYPES:
+        type_name = "Async" + type_name
+    types = importlib.import_module("devupai.types")
+    if hasattr(types, type_name):
+        found: type[Any] = getattr(types, type_name)
+        return found
+    devupai = importlib.import_module("devupai")
+    found = getattr(devupai, type_name)
+    return found
+
+
+def sample_url(name: str) -> str:
+    """The full URL the sample call of ``name`` sends."""
+    sample = SAMPLES[name]
+    return ORIGIN + sample.path + (f"?{sample.query}" if sample.query else "")
+
+
+def sample_accept(name: str) -> str:
+    """The ``Accept`` header of the sample call: ``*/*`` for a binary result (``kind="raw"``)."""
+    return "*/*" if SAMPLES[name].binary else "application/json"
+
+
+def sample_kind(name: str) -> str:
+    """The ``kind`` the sample call passes to the client's request entry."""
+    return "raw" if SAMPLES[name].binary else "json"
+
+
+def binary_response(
+    content: bytes = BINARY_CONTENT, status: int = 200, headers: Mapping[str, str] | None = None
+) -> httpx.Response:
+    """A file answer: ``content-type: image/png`` and ``x-request-id: REQ_ID`` unless ``headers`` sets them."""
+    merged = {"content-type": BINARY_CONTENT_TYPE, "x-request-id": REQ_ID}
+    for key, value in (headers or {}).items():
+        merged[key.lower()] = value
+    return httpx.Response(status, headers=merged, content=content)
+
+
+def sample_response(name: str, headers: Mapping[str, str] | None = None) -> httpx.Response:
+    """A 200 answer valid for the sample of ``name``: its JSON body, or its file bytes."""
+    sample = SAMPLES[name]
+    if sample.binary:
+        assert isinstance(sample.response, bytes)
+        return binary_response(sample.response, headers=headers)
+    return json_response(sample.response, headers=headers)
+
 
 def expected_body(name: str) -> dict[str, object] | None:
-    """The JSON body the sample call of ``name`` sends (``None`` for a GET)."""
+    """The JSON body the sample call of ``name`` sends (``None`` for a GET or a multipart form)."""
     sample = SAMPLES[name]
-    if sample.http_method == "GET":
+    if sample.http_method == "GET" or sample.form is not None:
         return None
     if name == "inference.run":
         payload = sample.args[1]
         assert isinstance(payload, dict)
         return dict(payload)
     return dict(sample.kwargs)
+
+
+#: The POST methods whose sample sends a JSON body (and so take ``extra_body``).
+JSON_POST_METHODS: tuple[str, ...] = tuple(name for name in SAMPLES if expected_body(name) is not None)
+
+#: The POST methods whose sample sends a multipart form (Node's fixed field list; no ``extra_body``).
+FORM_POST_METHODS: tuple[str, ...] = tuple(name for name, sample in SAMPLES.items() if sample.form is not None)
+
+_DISPOSITION_PARAM = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+
+
+def multipart_parts(request: RecordedRequest) -> list[Part]:
+    """The parts of a recorded ``multipart/form-data`` request, in order.
+
+    Asserts the framing: the ``Content-Type`` carries the boundary, every part is delimited by it, and the body ends
+    with the closing delimiter.
+    """
+    content_type = request.headers.get("content-type", "")
+    assert content_type.startswith("multipart/form-data; boundary="), content_type
+    boundary = content_type.split("boundary=", 1)[1].strip('"').encode("ascii")
+    delimiter = b"--" + boundary
+    body = request.content
+    assert body.startswith(delimiter + b"\r\n"), body[:80]
+    assert body.endswith(delimiter + b"--\r\n"), body[-80:]
+    sections = body.split(delimiter)
+    assert sections[0] == b"" and sections[-1] == b"--\r\n"
+    parts: list[Part] = []
+    for section in sections[1:-1]:
+        assert section.startswith(b"\r\n") and section.endswith(b"\r\n"), section[:80]
+        head, separator, content = section[2:-2].partition(b"\r\n\r\n")
+        assert separator, "a part has no blank line after its headers"
+        headers: dict[str, str] = {}
+        for line in head.decode("utf-8").split("\r\n"):
+            key, _, value = line.partition(":")
+            headers[key.strip().lower()] = value.strip()
+        disposition = headers.pop("content-disposition")
+        assert disposition.startswith("form-data;"), disposition
+        params = dict(_DISPOSITION_PARAM.findall(disposition))
+        part_type = headers.pop("content-type", None)
+        assert not headers, f"unexpected part headers: {headers}"
+        parts.append(Part(params["name"], params.get("filename"), part_type, content))
+    return parts
 
 
 def split_name(name: str) -> tuple[str, str]:
@@ -322,6 +458,41 @@ def invoke(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         if inspect.isawaitable(result):
             return await result
         return result
+
+    return anyio.run(main)
+
+
+def _classes(*names: str) -> tuple[type[Any], ...]:
+    """The ``devupai`` classes among ``names`` that exist (an empty tuple matches nothing in ``isinstance``)."""
+    devupai = importlib.import_module("devupai")
+    return tuple(getattr(devupai, name) for name in names if hasattr(devupai, name))
+
+
+async def drain(value: Any) -> Any:
+    """Consumes a stream or a binary result in the running loop (the ``.data`` of an ``APIResponse`` too).
+
+    Returns the list of items of a stream, the bytes of a binary result, and ``None`` for anything else.
+    """
+    target = value.data if isinstance(value, _classes("APIResponse")) else value
+    if isinstance(target, _classes("AsyncStream")):
+        return [item async for item in target]
+    if isinstance(target, _classes("Stream")):
+        return list(target)
+    if isinstance(target, _classes("AsyncBinaryResponse")):
+        return await target.read()
+    if isinstance(target, _classes("BinaryResponse")):
+        return target.read()
+    return None
+
+
+def invoke_and_read(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> tuple[Any, Any]:
+    """Like :func:`invoke`, then :func:`drain` in the same loop: returns ``(result, what was read)``."""
+
+    async def main() -> tuple[Any, Any]:
+        result = fn(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result, await drain(result)
 
     return anyio.run(main)
 
@@ -366,7 +537,12 @@ def discover(client: object) -> dict[str, Discovered]:
 
 
 def call_sample(client: object, name: str, *, with_response: bool = False, **overrides: Any) -> Any:
-    """Calls the sample of ``name`` on ``client`` with ``overrides`` added to its keyword arguments."""
+    """Calls the sample of ``name`` on ``client`` with ``overrides`` added to its keyword arguments.
+
+    A binary result is read inside the same event loop, so its bytes are in ``result.response.content`` afterwards
+    on both clients.
+    """
     sample = SAMPLES[name]
     kwargs: dict[str, Any] = {**sample.kwargs, **overrides}
-    return invoke(method_of(client, name, with_response=with_response), *sample.args, **kwargs)
+    result, _ = invoke_and_read(method_of(client, name, with_response=with_response), *sample.args, **kwargs)
+    return result

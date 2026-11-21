@@ -1,7 +1,7 @@
 """Types of ``POST /v1/chat/completions``: the request body, the response, and the stream chunks."""
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, Required, TypeAlias, TypedDict
+from typing import Literal, NotRequired, Required, TypeAlias, TypedDict
 
 from pydantic import Field
 
@@ -17,8 +17,11 @@ __all__ = [
     "ChatCompletionChunkDeltaToolCall",
     "ChatCompletionChunkDeltaToolCallFunction",
     "ChatCompletionCreateParams",
+    "ChatCompletionCreateParamsBase",
+    "ChatCompletionCreateParamsNonStreaming",
     "ChatCompletionCreateParamsReasoning",
     "ChatCompletionCreateParamsStreamOptions",
+    "ChatCompletionCreateParamsStreaming",
     "ChatCompletionMessage",
     "ChatCompletionMessageParam",
     "ChatCompletionStreamError",
@@ -105,15 +108,14 @@ class ChatCompletionCreateParamsStreamOptions(TypedDict, total=False):
     include_usage: bool
 
 
-class ChatCompletionCreateParams(TypedDict, total=False):
-    """The request body of ``POST /v1/chat/completions``."""
+class ChatCompletionCreateParamsBase(TypedDict, total=False):
+    """The request body of ``POST /v1/chat/completions`` without ``stream``: the fields every form shares."""
 
     model: Required[str]
     messages: Required[Sequence[ChatCompletionMessageParam]]
     max_tokens: int
     temperature: float
     top_p: float
-    stream: bool
     stop: str | Sequence[str]
     frequency_penalty: float
     presence_penalty: float
@@ -130,6 +132,25 @@ class ChatCompletionCreateParams(TypedDict, total=False):
     seed: int
     user: str
     logprobs: bool
+
+
+class ChatCompletionCreateParams(ChatCompletionCreateParamsBase, total=False):
+    """The request body of ``POST /v1/chat/completions``."""
+
+    stream: bool
+    """``True`` returns a stream of :class:`ChatCompletionChunk` instead of one :class:`ChatCompletion`."""
+
+
+class ChatCompletionCreateParamsStreaming(ChatCompletionCreateParamsBase, total=False):
+    """The request body of a streamed chat completion (``stream=True``)."""
+
+    stream: Required[Literal[True]]
+
+
+class ChatCompletionCreateParamsNonStreaming(ChatCompletionCreateParamsBase, total=False):
+    """The request body of a chat completion returned whole (``stream`` left out or ``False``)."""
+
+    stream: NotRequired[Literal[False]]
 
 
 # -------------------------------------------------------------------------------------------------- response side

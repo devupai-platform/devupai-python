@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, NoReturn, Unpack
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, Unpack, overload
 
 from devupai._response import APIResponse
 from devupai.resources._base import (
-    NOT_IMPLEMENTED_MESSAGE,
     AsyncAPIResource,
     SyncAPIResource,
     billed_post_retry,
@@ -16,12 +15,13 @@ from devupai.resources._base import (
     options,
     with_data,
 )
-from devupai.types import SpeechResponse
+from devupai.resources.shared import MultipartPart, fixed_form
+from devupai.types import SpeechResponse, TranscriptionResponse, TranscriptionVerboseResponse
 from devupai.types._base import parse_model
 
 if TYPE_CHECKING:
     from devupai._client import AsyncDevupAI, DevupAI
-    from devupai.types import SpeechCreateParams, TranscriptionCreateParams
+    from devupai.types import FileInput, SpeechCreateParams
 
 __all__ = [
     "Audio",
@@ -38,6 +38,55 @@ __all__ = [
 
 _SPEECH_PATH = "/audio/speech"
 _TRANSCRIPTIONS_PATH = "/audio/transcriptions"
+
+TextTranscriptionFormat = Literal["text", "srt", "vtt"]
+"""The transcription formats returned as plain text (a ``str``)."""
+TranscriptionFormat = Literal["json", "verbose_json", "text", "srt", "vtt"]
+"""Every transcription ``response_format``."""
+TimestampGranularity = Literal["word", "segment"]
+"""A ``timestamp_granularities`` value."""
+
+_TEXT_FORMATS = frozenset({"text", "srt", "vtt"})
+
+
+def _transcription_parts(
+    *,
+    file: FileInput,
+    model: str | None,
+    language: str | None,
+    response_format: str | None,
+    prompt: str | None,
+    temperature: float | None,
+    timestamp_granularities: Sequence[str] | None,
+) -> list[MultipartPart]:
+    """The form parts of a transcription: ``file``, then the set fields in a fixed order, then one
+    ``timestamp_granularities[]`` part per value. A field set to ``None`` is left out."""
+    return fixed_form(
+        (
+            ("file", file),
+            ("model", model),
+            ("language", language),
+            ("response_format", response_format),
+            ("prompt", prompt),
+            ("temperature", temperature),
+            ("timestamp_granularities[]", timestamp_granularities),
+        ),
+        file_fields=("file",),
+    )
+
+
+def _transcription_kind(response_format: str | None) -> Literal["json", "text"]:
+    return "text" if response_format in _TEXT_FORMATS else "json"
+
+
+def _transcription_result(
+    response: APIResponse[object], response_format: str | None
+) -> APIResponse[TranscriptionResponse] | APIResponse[TranscriptionVerboseResponse] | APIResponse[str]:
+    if response_format in _TEXT_FORMATS:
+        return with_data(response, str(response.data))
+    if response_format == "verbose_json":
+        return with_data(response, parse_model(TranscriptionVerboseResponse, response.data))
+    return with_data(response, parse_model(TranscriptionResponse, response.data))
 
 
 class SpeechWithResponse(SyncAPIResource):
@@ -99,17 +148,100 @@ class Speech(SyncAPIResource):
 class TranscriptionsWithResponse(SyncAPIResource):
     """The methods of :class:`Transcriptions`, returning the whole :class:`~devupai.APIResponse`."""
 
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TextTranscriptionFormat,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[str]: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["verbose_json"],
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionVerboseResponse]: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["json"] | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionResponse]: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionResponse] | APIResponse[TranscriptionVerboseResponse] | APIResponse[str]: ...
     @endpoint("POST", _TRANSCRIPTIONS_PATH, billed=True)
     def create(
         self,
         *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-        **params: Unpack[TranscriptionCreateParams],
-    ) -> NoReturn:
-        """Transcribes an audio file; see :meth:`Transcriptions.create`. Available in a later build."""
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+    ) -> APIResponse[TranscriptionResponse] | APIResponse[TranscriptionVerboseResponse] | APIResponse[str]:
+        """Transcribes an audio file; see :meth:`Transcriptions.create`."""
+        parts = _transcription_parts(
+            file=file,
+            model=model,
+            language=language,
+            response_format=response_format,
+            prompt=prompt,
+            temperature=temperature,
+            timestamp_granularities=timestamp_granularities,
+        )
+        response = self._send(
+            "POST",
+            _TRANSCRIPTIONS_PATH,
+            multipart=parts,
+            retry=billed_post_retry(),
+            kind=_transcription_kind(response_format),
+            options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
+        )
+        return _transcription_result(response, response_format)
 
 
 class Transcriptions(SyncAPIResource):
@@ -120,21 +252,113 @@ class Transcriptions(SyncAPIResource):
         """The same methods, returning the whole :class:`~devupai.APIResponse` (headers, request id, warnings)."""
         return TranscriptionsWithResponse(self._client)
 
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TextTranscriptionFormat,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> str: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["verbose_json"],
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionVerboseResponse: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["json"] | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionResponse: ...
+    @overload
+    def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionResponse | TranscriptionVerboseResponse | str: ...
     @endpoint("POST", _TRANSCRIPTIONS_PATH, billed=True)
     def create(
         self,
         *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-        **params: Unpack[TranscriptionCreateParams],
-    ) -> NoReturn:
+    ) -> TranscriptionResponse | TranscriptionVerboseResponse | str:
         """Transcribes an audio file.
 
-        The audio file is sent as multipart form data, which is available in a later build: this method raises
-        ``NotImplementedError`` before anything is sent.
+        The file and the fields are sent as ``multipart/form-data``: ``file`` (bytes, a path, an open binary file
+        or a ``(filename, content[, content_type])`` tuple), then ``model``, ``language``, ``response_format``,
+        ``prompt``, ``temperature`` and one ``timestamp_granularities[]`` part per value. A field left as ``None``
+        is not sent. A path is opened and closed by the SDK; an open file is read and left open.
+
+        The result follows ``response_format``: ``text``, ``srt`` and ``vtt`` return a ``str``; ``verbose_json``
+        returns a :class:`~devupai.types.TranscriptionVerboseResponse`; ``json`` (the default) returns a
+        :class:`~devupai.types.TranscriptionResponse`.
+
+        ``extra_headers`` adds request headers, and ``timeout`` and ``max_retries`` apply to this call only.
+
+        Example::
+
+            from pathlib import Path
+
+            result = client.audio.transcriptions.create(file=Path("clip.wav"), model="<model-id>")
+            print(result.text)
         """
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+        return self.with_response.create(
+            file=file,
+            model=model,
+            language=language,
+            response_format=response_format,
+            prompt=prompt,
+            temperature=temperature,
+            timestamp_granularities=timestamp_granularities,
+            extra_headers=extra_headers,
+            timeout=timeout,
+            max_retries=max_retries,
+        ).data
 
 
 class Audio(SyncAPIResource):
@@ -211,17 +435,100 @@ class AsyncSpeech(AsyncAPIResource):
 class AsyncTranscriptionsWithResponse(AsyncAPIResource):
     """The methods of :class:`AsyncTranscriptions`, returning the whole :class:`~devupai.APIResponse`."""
 
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TextTranscriptionFormat,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[str]: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["verbose_json"],
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionVerboseResponse]: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["json"] | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionResponse]: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> APIResponse[TranscriptionResponse] | APIResponse[TranscriptionVerboseResponse] | APIResponse[str]: ...
     @endpoint("POST", _TRANSCRIPTIONS_PATH, billed=True)
     async def create(
         self,
         *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-        **params: Unpack[TranscriptionCreateParams],
-    ) -> NoReturn:
-        """Transcribes an audio file; see :meth:`AsyncTranscriptions.create`. Available in a later build."""
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+    ) -> APIResponse[TranscriptionResponse] | APIResponse[TranscriptionVerboseResponse] | APIResponse[str]:
+        """Transcribes an audio file; see :meth:`AsyncTranscriptions.create`."""
+        parts = _transcription_parts(
+            file=file,
+            model=model,
+            language=language,
+            response_format=response_format,
+            prompt=prompt,
+            temperature=temperature,
+            timestamp_granularities=timestamp_granularities,
+        )
+        response = await self._send(
+            "POST",
+            _TRANSCRIPTIONS_PATH,
+            multipart=parts,
+            retry=billed_post_retry(),
+            kind=_transcription_kind(response_format),
+            options=options(timeout=timeout, max_retries=max_retries, extra_headers=extra_headers),
+        )
+        return _transcription_result(response, response_format)
 
 
 class AsyncTranscriptions(AsyncAPIResource):
@@ -232,21 +539,114 @@ class AsyncTranscriptions(AsyncAPIResource):
         """The same methods, returning the whole :class:`~devupai.APIResponse` (headers, request id, warnings)."""
         return AsyncTranscriptionsWithResponse(self._client)
 
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TextTranscriptionFormat,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> str: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["verbose_json"],
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionVerboseResponse: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: Literal["json"] | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionResponse: ...
+    @overload
+    async def create(
+        self,
+        *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> TranscriptionResponse | TranscriptionVerboseResponse | str: ...
     @endpoint("POST", _TRANSCRIPTIONS_PATH, billed=True)
     async def create(
         self,
         *,
+        file: FileInput,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: TranscriptionFormat | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        timestamp_granularities: Sequence[TimestampGranularity] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
-        **params: Unpack[TranscriptionCreateParams],
-    ) -> NoReturn:
+    ) -> TranscriptionResponse | TranscriptionVerboseResponse | str:
         """Transcribes an audio file.
 
-        The audio file is sent as multipart form data, which is available in a later build: this method raises
-        ``NotImplementedError`` before anything is sent.
+        The file and the fields are sent as ``multipart/form-data``: ``file`` (bytes, a path, an open binary file
+        or a ``(filename, content[, content_type])`` tuple), then ``model``, ``language``, ``response_format``,
+        ``prompt``, ``temperature`` and one ``timestamp_granularities[]`` part per value. A field left as ``None``
+        is not sent. A path is opened and closed by the SDK; an open file is read and left open.
+
+        The result follows ``response_format``: ``text``, ``srt`` and ``vtt`` return a ``str``; ``verbose_json``
+        returns a :class:`~devupai.types.TranscriptionVerboseResponse`; ``json`` (the default) returns a
+        :class:`~devupai.types.TranscriptionResponse`.
+
+        ``extra_headers`` adds request headers, and ``timeout`` and ``max_retries`` apply to this call only.
+
+        Example::
+
+            from pathlib import Path
+
+            result = await client.audio.transcriptions.create(file=Path("clip.wav"), model="<model-id>")
+            print(result.text)
         """
-        raise NotImplementedError(NOT_IMPLEMENTED_MESSAGE)
+        response = await self.with_response.create(
+            file=file,
+            model=model,
+            language=language,
+            response_format=response_format,
+            prompt=prompt,
+            temperature=temperature,
+            timestamp_granularities=timestamp_granularities,
+            extra_headers=extra_headers,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        return response.data
 
 
 class AsyncAudio(AsyncAPIResource):

@@ -1,12 +1,12 @@
 """Every path the SDK can call exists in the vendored spec with the same HTTP method (decisions B item 4).
 
-The ``Endpoint`` of each decorated method (found by introspection, NIE methods included) is checked against the
-``paths`` of ``openapi/devupai-v1.yaml``: a template is relative to the versioned base (``/v1``), or to the host root
-when ``root=True``. For each implemented method, the path actually sent must match its template. Every operation of
-the spec, the Messages-compatible one aside, is covered by at least one SDK method.
+The ``Endpoint`` of each decorated method (found by introspection) is checked against the ``paths`` of
+``openapi/devupai-v1.yaml``: a template is relative to the versioned base (``/v1``), or to the host root when
+``root=True``. For each method, the path actually sent must match its template. Every operation of the spec, the
+Messages-compatible one aside, is covered by at least one SDK method.
 
 ``images.download`` takes an absolute URL (contract §3.3), so its template is not looked up; the spec's
-``proxyImage`` operation counts as covered by it.
+``proxyImage`` operation counts as covered by it, and the path it sends for the sample URL must be that operation's.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 from helpers.mock_transport import MockAPI, json_response, sequence
-from helpers.samples import IMPLEMENTED, SAMPLES, call_sample, discover
+from helpers.samples import IMPLEMENTED, SAMPLES, call_sample, discover, sample_response, sample_url
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "openapi" / "devupai-v1.yaml"
@@ -138,7 +138,7 @@ def test_each_sample_path_matches_its_template(client_kind: str, name: str) -> N
 @pytest.mark.parametrize("name", IMPLEMENTED)
 def test_the_path_sent_matches_the_endpoint_template(client_kind: str, name: str) -> None:
     sample = SAMPLES[name]
-    api, client = make_client(client_kind, json_response(sample.response))
+    api, client = make_client(client_kind, sample_response(name))
     endpoint = discover(client)[name].endpoint
     call_sample(client, name)
     assert len(api.calls) == 1
@@ -146,5 +146,10 @@ def test_the_path_sent_matches_the_endpoint_template(client_kind: str, name: str
     assert sent.method == endpoint.method
     sent_path = urlsplit(sent.url).path
     assert sent_path == sample.path
+    if name in ABSOLUTE_URL_METHODS:
+        # The URL is sent as given: its path is the path of the operation it stands for.
+        assert sent.url == sample_url(name)
+        assert spec_operations().get((sent.method, sent_path)) == ABSOLUTE_URL_METHODS[name]
+        return
     assert template_regex(spec_path(endpoint)).fullmatch(sent_path), (sent_path, endpoint.path)
     assert (endpoint.method, spec_path(endpoint)) in spec_operations()

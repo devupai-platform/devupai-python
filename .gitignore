@@ -3,12 +3,12 @@
 .venv314/
 .venv*/
 
-# Python caches
+# Bytecode and tool state folders
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+.pytest_*/
+.mypy_*/
+.ruff_*/
 
 # Coverage
 .coverage

@@ -1,7 +1,7 @@
 """Types of ``POST /v1/responses``: the request body, the response, and the stream events."""
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, Required, TypeAlias, TypedDict
+from typing import Literal, NotRequired, Required, TypeAlias, TypedDict
 
 from pydantic import Field
 
@@ -10,7 +10,10 @@ from .shared import DevUpBilling
 
 __all__ = [
     "ResponseCreateParams",
+    "ResponseCreateParamsBase",
+    "ResponseCreateParamsNonStreaming",
     "ResponseCreateParamsReasoning",
+    "ResponseCreateParamsStreaming",
     "ResponseCreateParamsTool",
     "ResponseCreateParamsToolChoice",
     "ResponseObject",
@@ -48,8 +51,8 @@ class ResponseCreateParamsToolChoice(TypedDict, total=False):
     name: Required[str]
 
 
-class ResponseCreateParams(TypedDict, total=False):
-    """The request body of ``POST /v1/responses``."""
+class ResponseCreateParamsBase(TypedDict, total=False):
+    """The request body of ``POST /v1/responses`` without ``stream``: the fields every form shares."""
 
     model: Required[str]
     input: str | Sequence[Mapping[str, object]]
@@ -69,7 +72,6 @@ class ResponseCreateParams(TypedDict, total=False):
     service_tier: str
     truncation: str | Mapping[str, object]
     store: bool
-    stream: bool
     include: Sequence[str]
     safety_identifier: str
     top_logprobs: int
@@ -78,6 +80,25 @@ class ResponseCreateParams(TypedDict, total=False):
     previous_response_id: str | None
     client_metadata: Mapping[str, object]
     background: Literal[False] | None
+
+
+class ResponseCreateParams(ResponseCreateParamsBase, total=False):
+    """The request body of ``POST /v1/responses``."""
+
+    stream: bool
+    """``True`` returns a stream of :class:`ResponseStreamEvent` instead of one :class:`ResponseObject`."""
+
+
+class ResponseCreateParamsStreaming(ResponseCreateParamsBase, total=False):
+    """The request body of a streamed response (``stream=True``)."""
+
+    stream: Required[Literal[True]]
+
+
+class ResponseCreateParamsNonStreaming(ResponseCreateParamsBase, total=False):
+    """The request body of a response returned whole (``stream`` left out or ``False``)."""
+
+    stream: NotRequired[Literal[False]]
 
 
 # -------------------------------------------------------------------------------------------------- response side
