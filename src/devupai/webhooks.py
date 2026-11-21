@@ -235,7 +235,7 @@ def construct_webhook_event(
         data: object = json.loads(body_text, parse_constant=_reject_constant)
     except (ValueError, RecursionError) as exc:
         raise DevupWebhookVerificationError(
-            "invalid_json", f"Failed to parse verified webhook payload as JSON: {exc}"
+            "invalid_json", f"The verified webhook payload is not valid JSON: {exc}"
         ) from exc
     if not isinstance(data, dict):
         raise DevupWebhookVerificationError("invalid_json", "The verified webhook payload is not a JSON object.")

@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: 'python -m pip install --require-hashes --only-binary :all: -r requirements-release.txt'
 
       - name: Check the tag matches the package version
         run: python scripts/check_tag_version.py "${GITHUB_REF_NAME}"

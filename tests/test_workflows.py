@@ -5,6 +5,8 @@ publishing right; the ``publish`` job alone has ``id-token: write``, runs in the
 with no stored secret. Every ``uses:`` names a full commit SHA with its tag in a comment, the pins of contract §8.
 
 The Python matrix of ``ci.yml`` is covered by ``test_python_floor.py``; this file checks only that it is unchanged.
+The ``release-install`` job of ``ci.yml`` runs the release build's own commands on every push, so a hash or pin
+that no longer installs shows up before a tag is pushed.
 """
 
 from __future__ import annotations
@@ -165,7 +167,7 @@ def test_build_checks_out_without_persisting_credentials() -> None:
 
 def test_build_checks_the_tag_builds_checks_and_uploads_in_order() -> None:
     steps = _steps(_release_job("build"))
-    install = _index(steps, r"pip install -r requirements-dev\.txt")
+    install = _index(steps, r"pip install --require-hashes --only-binary :all: -r requirements-release\.txt")
     tag = _index(steps, r"python scripts/check_tag_version\.py \"\$\{GITHUB_REF_NAME\}\"")
     build = _index(steps, r"-m build --no-isolation")
     twine = _index(steps, r"twine check --strict dist/\*")
@@ -176,6 +178,28 @@ def test_build_checks_the_tag_builds_checks_and_uploads_in_order() -> None:
     artifact = steps[upload].get("with", {})
     assert artifact.get("name") == "dist"
     assert str(artifact.get("path", "")).rstrip("/") == "dist"
+
+
+def test_build_installs_only_the_hashed_release_requirements() -> None:
+    # STOP-3 answer 1: the job that builds the published files installs a fully pinned, hashed set and nothing else.
+    # Wheels only (review S-2): a source build would run code whose own build dependencies carry no hash.
+    steps = _steps(_release_job("build"))
+    installs = [str(step["run"]).strip() for step in steps if "pip" in str(step.get("run", ""))]
+    assert installs == ["python -m pip install --require-hashes --only-binary :all: -r requirements-release.txt"]
+    assert (ROOT / "requirements-release.txt").is_file()
+
+
+def test_no_release_step_installs_requirements_dev() -> None:
+    for name, job in _jobs(_load(RELEASE)).items():
+        for step in _steps(job):
+            assert "requirements-dev" not in json.dumps(step), f"{name}: {step}"
+    assert "requirements-dev" not in RELEASE.read_text(encoding="utf-8")
+
+
+def test_build_keeps_no_isolation() -> None:
+    # The backend comes from the hashed set; an isolated build would fetch it again without hashes.
+    steps = _steps(_release_job("build"))
+    assert str(steps[_index(steps, r"-m build(\s|$)")]["run"]).strip() == "python -m build --no-isolation"
 
 
 # --- both files: no stored secret, every action pinned --------------------------------------------------------
@@ -249,3 +273,79 @@ def test_ci_keeps_the_q3_matrix() -> None:
     include = job.get("strategy", {}).get("matrix", {}).get("include")
     assert isinstance(include, list), "the test job has no strategy.matrix.include list"
     assert [(entry.get("os"), entry.get("python-version")) for entry in include] == CI_MATRIX
+
+
+# --- ci.yml: the release-install job (STOP-4 answer 3) -----------------------------------------------------------
+
+RELEASE_INSTALL = "python -m pip install --require-hashes --only-binary :all: -r requirements-release.txt"
+
+
+def _ci_release_install_job() -> dict[str, Any]:
+    job = _jobs(_load(CI)).get("release-install")
+    assert isinstance(job, dict), "ci.yml has no 'release-install' job"
+    return job
+
+
+def _runs(steps: list[dict[str, Any]]) -> list[str]:
+    return [str(step["run"]).strip() for step in steps if "run" in step]
+
+
+def test_ci_has_exactly_the_test_lowest_dependencies_and_release_install_jobs() -> None:
+    assert set(_jobs(_load(CI))) == {"test", "lowest-dependencies", "release-install"}
+
+
+def test_ci_release_install_runs_on_ubuntu_with_python_3_12_like_the_release_build() -> None:
+    job = _ci_release_install_job()
+    assert job.get("runs-on") == "ubuntu-latest" == _release_job("build").get("runs-on")
+    steps = _steps(job)
+    setup = steps[_uses_index(steps, "actions/setup-python")]
+    assert str(setup.get("with", {}).get("python-version")) == "3.12"
+
+
+def test_ci_release_install_uses_the_release_build_actions_at_the_same_shas() -> None:
+    job_steps = _steps(_ci_release_install_job())
+    build_steps = _steps(_release_job("build"))
+    for action in ("actions/checkout", "actions/setup-python"):
+        ci_ref = str(job_steps[_uses_index(job_steps, action)]["uses"])
+        release_ref = str(build_steps[_uses_index(build_steps, action)]["uses"])
+        assert ci_ref == release_ref == f"{action}@{PINS[action][0]}"
+    assert [_action(step) for step in job_steps if "uses" in step] == ["actions/checkout", "actions/setup-python"]
+    checkout = job_steps[_uses_index(job_steps, "actions/checkout")]
+    assert checkout.get("with", {}).get("persist-credentials") is False
+
+
+def test_ci_release_install_installs_exactly_the_release_line_and_nothing_else() -> None:
+    steps = _steps(_ci_release_install_job())
+    installs = [run for run in _runs(steps) if "pip" in run]
+    assert installs == [RELEASE_INSTALL]
+    build_installs = [run for run in _runs(_steps(_release_job("build"))) if "pip" in run]
+    assert build_installs == [RELEASE_INSTALL], "the release build line changed; the CI job must follow it"
+    assert "requirements-dev" not in json.dumps(_ci_release_install_job())
+
+
+def test_ci_release_install_runs_the_release_build_commands_in_order() -> None:
+    # The same commands as the release build job, minus the tag check (CI runs on branches, not on a tag).
+    release_runs = [run for run in _runs(_steps(_release_job("build"))) if "check_tag_version" not in run]
+    assert release_runs == [
+        RELEASE_INSTALL,
+        "python -m build --no-isolation",
+        "python -m twine check --strict dist/*",
+        "python scripts/check_wheel_contents.py dist",
+    ]
+    assert _runs(_steps(_ci_release_install_job())) == release_runs
+
+
+def test_ci_release_install_has_the_release_build_keys_and_plain_steps() -> None:
+    # No ``if``, ``continue-on-error`` or ``env`` (an index URL, say) on the job or a step: either would let the
+    # job pass without running the release install as the release build runs it.
+    job = _ci_release_install_job()
+    assert set(job) == set(_release_job("build")) == {"name", "runs-on", "timeout-minutes", "steps"}
+    for step in _steps(job):
+        assert set(step) <= {"name", "uses", "with", "run"}, step
+
+
+def test_ci_release_install_has_no_extra_permission() -> None:
+    job = _ci_release_install_job()
+    assert "permissions" not in job, "the job keeps the workflow-level contents: read"
+    assert "environment" not in job
+    assert "id-token" not in json.dumps(job)

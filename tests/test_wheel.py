@@ -27,7 +27,19 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_wheel_contents.py"
 
-VERSION = "1.0.0a1"
+VERSION_FILE = ROOT / "src" / "devupai" / "_version.py"
+
+
+def _real_version() -> str:
+    """The ``__version__`` string of this checkout, read from the file (the package is not imported)."""
+    text = VERSION_FILE.read_text(encoding="utf-8")
+    match = re.search(r"""^__version__\s*(?::\s*str\s*)?=\s*["']([^"']+)["']""", text, re.MULTILINE)
+    assert match, f"{VERSION_FILE} has no __version__ string"
+    return match.group(1)
+
+
+#: The package version: the synthetic archives carry it, and the real archives must.
+VERSION = _real_version()
 WHEEL_NAME = f"devupai-{VERSION}-py3-none-any.whl"
 SDIST_NAME = f"devupai-{VERSION}.tar.gz"
 DIST_INFO = f"devupai-{VERSION}.dist-info"
@@ -475,6 +487,19 @@ def _real_members(folder: Path) -> tuple[list[str], list[str]]:
     with tarfile.open(sdists[0], "r:gz") as archive:
         sdist_names = archive.getnames()
     return wheel_names, sdist_names
+
+
+def test_the_real_archives_carry_the_package_version(built: Path) -> None:
+    assert sorted(path.name for path in built.iterdir()) == sorted([WHEEL_NAME, SDIST_NAME])
+    wheel_names, sdist_names = _real_members(built)
+    assert f"{DIST_INFO}/METADATA" in wheel_names
+    assert f"{SDIST_ROOT}/PKG-INFO" in sdist_names
+    with zipfile.ZipFile(built / WHEEL_NAME) as archive:
+        metadata = archive.read(f"{DIST_INFO}/METADATA").decode("utf-8")
+    assert re.search(rf"^Version: {re.escape(VERSION)}$", metadata, re.MULTILINE), metadata[:400]
+    statuses = re.findall(r"^Classifier: (Development Status :: .+)$", metadata, re.MULTILINE)
+    if re.fullmatch(r"\d+\.\d+\.\d+", VERSION):
+        assert statuses == ["Development Status :: 5 - Production/Stable"], statuses
 
 
 def test_the_checker_passes_on_the_real_archives(built: Path, capsys: pytest.CaptureFixture[str]) -> None:

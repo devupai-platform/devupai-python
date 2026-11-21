@@ -27,9 +27,20 @@ __all__ = [
 
 _PATH_TEMPLATE = "/inference/{model_path}"
 _PAYLOAD_MESSAGE = "The payload of inference.run must be a mapping of field names to values."
+_RESPONSE_TYPE_MESSAGE = 'response_type must be "json" or "binary".'
 
 ResponseType = Literal["json", "binary"]
 """How the answer of :meth:`NativeInference.run` is read: parsed as JSON, or as a file."""
+
+_RESPONSE_TYPES: frozenset[str] = frozenset({"json", "binary"})
+
+
+def _is_binary(response_type: ResponseType) -> bool:
+    """Whether the answer is read as a file. Any value other than the strings ``"json"`` and ``"binary"`` raises
+    ``ValueError``, so a typo is reported before anything is sent."""
+    if not isinstance(response_type, str) or response_type not in _RESPONSE_TYPES:  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError(_RESPONSE_TYPE_MESSAGE)
+    return response_type == "binary"
 
 
 def _prepare(
@@ -100,8 +111,8 @@ class NativeInferenceWithResponse(SyncAPIResource):
         extra_body: Mapping[str, object] | None = None,
     ) -> APIResponse[object] | APIResponse[BinaryResponse]:
         """Sends a model-specific payload to a model; see :meth:`NativeInference.run`."""
+        binary = _is_binary(response_type)
         path, body, parts = _prepare(model_path, payload, extra_body)
-        binary = response_type == "binary"
         response = self._send(
             "POST",
             path,
@@ -173,7 +184,8 @@ class NativeInference(SyncAPIResource):
 
         The answer is parsed as JSON. With ``response_type="binary"``, for a model that answers with a file (an
         image, an audio clip or a video), it is returned as a :class:`~devupai.BinaryResponse` with its body not
-        read yet.
+        read yet. ``response_type`` is the string ``"json"`` or ``"binary"``; any other value raises ``ValueError``
+        before anything is sent.
 
         ``extra_body`` adds fields to the payload (merged last), ``extra_headers`` adds request headers, and
         ``timeout`` and ``max_retries`` apply to this call only.
@@ -248,8 +260,8 @@ class AsyncNativeInferenceWithResponse(AsyncAPIResource):
         extra_body: Mapping[str, object] | None = None,
     ) -> APIResponse[object] | APIResponse[AsyncBinaryResponse]:
         """Sends a model-specific payload to a model; see :meth:`AsyncNativeInference.run`."""
+        binary = _is_binary(response_type)
         path, body, parts = _prepare(model_path, payload, extra_body)
-        binary = response_type == "binary"
         response = await self._send(
             "POST",
             path,
@@ -321,7 +333,8 @@ class AsyncNativeInference(AsyncAPIResource):
 
         The answer is parsed as JSON. With ``response_type="binary"``, for a model that answers with a file (an
         image, an audio clip or a video), it is returned as an :class:`~devupai.AsyncBinaryResponse` with its body
-        not read yet.
+        not read yet. ``response_type`` is the string ``"json"`` or ``"binary"``; any other value raises
+        ``ValueError`` before anything is sent.
 
         ``extra_body`` adds fields to the payload (merged last), ``extra_headers`` adds request headers, and
         ``timeout`` and ``max_retries`` apply to this call only.

@@ -381,7 +381,7 @@ def test_construct_raises_invalid_json_for_a_valid_signature_over_malformed_json
     body = "{ this is not valid JSON }"
     error = construct_error(raw_body=body, signature_header=header_for(body), secret=TEST_SECRET)
     assert error.reason == "invalid_json"
-    assert "Failed to parse verified webhook payload as JSON" in str(error)
+    assert "The verified webhook payload is not valid JSON" in str(error)
     assert error.__cause__ is not None
 
 

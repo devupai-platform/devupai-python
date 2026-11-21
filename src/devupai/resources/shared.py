@@ -220,8 +220,36 @@ def _items(value: object) -> list[object]:
     return [value]
 
 
+_IMAGE_INPUT_ALLOWED = 'a file, a URL or data URI string, or {"image_url": "..."}.'
+
+
+def _is_image_input_item(item: object) -> bool:
+    """Whether ``item`` can be an input image part: a ``str``, a file, or a mapping whose ``image_url`` is a ``str``."""
+    if isinstance(item, str) or is_file_input(item):
+        return True
+    return isinstance(item, Mapping) and isinstance(cast("Mapping[str, object]", item).get("image_url"), str)
+
+
+def _check_image_inputs(body: Mapping[str, object]) -> None:
+    """Raises ``TypeError`` naming the field when an item of an input-image field cannot be sent as a part.
+
+    It runs before any part is built, so no file is opened or read and nothing is sent. ``None`` (the whole field, or
+    a list item) is left out, as everywhere in a form.
+    """
+    for name in _IMAGE_INPUT_FIELDS:
+        value = body.get(name)
+        for item in _items(value):
+            if item is not None and not _is_image_input_item(item):
+                listed = not is_file_input(value) and isinstance(value, (list, tuple))
+                subject = f"Each item of {name}" if listed else name
+                raise TypeError(f"{subject} must be {_IMAGE_INPUT_ALLOWED}")
+
+
 def _image_input_part(item: object) -> MultipartValue | None:
-    """One input image as a part value: a file, a text value (URL or data URI), or the ``image_url`` of an object."""
+    """One input image as a part value: a file, a text value (URL or data URI), or the ``image_url`` of an object.
+
+    ``None`` for ``None``; :func:`_check_image_inputs` has refused every other item that is none of these.
+    """
     if isinstance(item, str):
         return item
     if is_file_input(item):
@@ -239,8 +267,13 @@ def image_edit_form(body: Mapping[str, object]) -> list[MultipartPart]:
     Each item of ``image`` and ``images`` is an ``image`` part, ``mask`` and ``markup`` are parts of their own name: a
     file is a file part, a string a text part, and ``{"image_url": ...}`` a text part with the URL. Every other field
     is sent too: an object or a list as one JSON-text part, a file as a file part, a scalar through
-    :func:`form_field`. ``None`` is left out.
+    :func:`form_field`. ``None`` is left out, also as an item of an input-image field.
+
+    Raises:
+        TypeError: an item of ``image``, ``images``, ``mask`` or ``markup`` is none of a file, a ``str`` or a
+            mapping whose ``image_url`` is a ``str``. All items are checked first, so no file is opened or read.
     """
+    _check_image_inputs(body)
     parts: list[MultipartPart] = []
     for name, value in body.items():
         if name in _IMAGE_INPUT_FIELDS:

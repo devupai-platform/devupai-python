@@ -2,6 +2,42 @@
 
 All notable changes to the `devupai` Python package are documented in this file.
 
+## [1.0.0]
+
+The first stable release. Install it with `pip install devupai`; `--pre` is
+no longer needed. No breaking changes from 1.0.0a1, except two checks that
+now run before a request is sent: `client.inference.run()` raises
+`ValueError` when `response_type` is anything other than `"json"` or
+`"binary"` (1.0.0a1 sent such a call as a JSON request), and
+`client.images.edit()` with a file input raises `TypeError` for an input
+image, mask or markup it cannot send (1.0.0a1 sent the request without it).
+
+### Changed
+
+- `client.inference.run()`, on `DevupAI` and on `AsyncDevupAI`, raises
+  `ValueError` for a `response_type` other than `"json"` or `"binary"`, and
+  sends no request. A call with `"json"`, `"binary"` or no `response_type`
+  works as before.
+- `client.images.edit()` sent as `multipart/form-data` (at least one input is
+  a file) raises `TypeError`, and sends no request, when an item of `image`,
+  `images`, `mask` or `markup` is not a file, a URL or data URI string, or
+  `{"image_url": "..."}`. Valid inputs are sent as before.
+- The message of a webhook error with reason `invalid_json` now reads "The
+  verified webhook payload is not valid JSON". The error class and its reason
+  are unchanged.
+- The package metadata gives the development status as Production/Stable.
+
+### Docs
+
+- The README has a short example for every resource, and covers streaming
+  and binary results in a `with` block (`async with` on `AsyncDevupAI`), file
+  uploads, `with_response`, errors and `request_id`, retries of billed
+  requests, webhooks, which settings of an `http_client` you pass are kept,
+  and when the SDK raises `TypeError` or `ValueError`.
+- The repository has an `examples/` folder with runnable scripts. A script
+  that sends a model id reads it from the `DEVUP_MODEL` environment variable;
+  `examples/models_list.py` lists the ids you can use.
+
 ## [1.0.0a1]
 
 The first pre-release of the official Python SDK for the DEVUP AI API, with a

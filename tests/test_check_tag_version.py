@@ -84,6 +84,27 @@ def test_a_tag_without_the_v_prefix_exits_1(layout: Layout) -> None:
     assert _names(output, "1.0.0a1"), output
 
 
+def _final_layout(layout: Layout) -> Layout:
+    """The same layout with a final release version instead of a pre-release."""
+    version_file = layout.root / "src" / "devupai" / "_version.py"
+    version_file.write_text(FAKE_VERSION.replace('"1.0.0a1"', '"1.0.0"'), encoding="utf-8")
+    return layout
+
+
+def test_a_final_release_accepts_its_own_tag(layout: Layout) -> None:
+    result = _final_layout(layout).run("v1.0.0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _names(result.stdout + result.stderr, "1.0.0")
+
+
+@pytest.mark.parametrize("tag", ["v1.0.0a1", "v1.0.0rc1", "v1.0.0.dev1", "v1.0", "v1.0.0.0", "1.0.0", "V1.0.0"])
+def test_a_final_release_refuses_any_other_tag(tag: str, layout: Layout) -> None:
+    result = _final_layout(layout).run(tag)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert _names(output, "1.0.0"), output
+
+
 def test_a_missing_argument_exits_2(layout: Layout) -> None:
     result = layout.run()
     assert result.returncode == 2, result.stdout + result.stderr

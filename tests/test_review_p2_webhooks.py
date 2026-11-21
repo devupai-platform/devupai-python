@@ -156,7 +156,7 @@ def test_a_float_tolerance_is_valid() -> None:
 def test_construct_raises_invalid_json_for_nan_or_infinity(body: str) -> None:
     error = construct_error(raw_body=body, signature_header=header(body), secret=SECRET)
     assert error.reason == "invalid_json"
-    assert "Failed to parse verified webhook payload as JSON" in str(error)
+    assert "The verified webhook payload is not valid JSON" in str(error)
     assert error.__cause__ is not None
 
 
