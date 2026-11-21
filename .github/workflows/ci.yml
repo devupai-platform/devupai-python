@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.11.0"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.15"
+          - os: windows-latest
+            python-version: "3.15"
+          - os: macos-latest
+            python-version: "3.15"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Check the vendored spec
+        run: python scripts/sync_spec.py --check
+
+      - name: Type-check (mypy)
+        run: python -m mypy
+
+      - name: Type-check (pyright)
+        run: python -m pyright
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Build
+        run: python -m build --no-isolation
+
+      - name: Check the package metadata
+        run: python -m twine check --strict dist/*
+
+      - name: List the distribution files
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_files="$(python -m zipfile -l dist/*.whl)"
+          sdist_files="$(tar -tzf dist/*.tar.gz)"
+          printf '%s\n' "Wheel:" "$wheel_files" "" "Source distribution:" "$sdist_files"
+          if printf '%s\n' "$wheel_files" "$sdist_files" | grep -q 'openapi/'; then
+            echo "The distribution files must not contain openapi/." >&2
+            exit 1
+          fi
+
+  lowest-dependencies:
+    name: Python 3.11.0 with the lowest dependency versions
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11.0
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.0"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Install the lowest allowed runtime dependencies
+        run: python -m pip install "httpx==0.28.1" "pydantic==2.10.0"
+
+      - name: Test
+        run: python -m pytest

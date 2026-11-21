@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Hashed byte for byte (openapi/SPEC_SHA256). Never normalise line endings.
+openapi/devupai-v1.yaml -text
+openapi/SPEC_SHA256 -text

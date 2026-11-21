@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+.venv314/
+.venv*/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Local settings
+.env
+.env.*

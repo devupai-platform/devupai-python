@@ -1,0 +1,20 @@
+# Development and test environment. Exact pins, latest stable releases at the time they were set.
+# Runtime dependencies (the ranges live in pyproject.toml; pinned here for a reproducible test run).
+httpx==0.28.1
+pydantic==2.14.4
+
+# Build
+hatchling==1.33.0
+build==1.6.1
+twine==7.0.0
+
+# Tests
+pytest==9.2.0
+anyio==4.16.0
+jsonschema==4.26.0
+PyYAML==6.0.4
+
+# Static checks
+mypy==2.4.1
+pyright==1.1.414
+ruff==0.17.6
