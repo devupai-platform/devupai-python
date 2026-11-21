@@ -60,10 +60,10 @@ xfail_strict = true
 [tool.mypy]
 strict = true
 python_version = "3.11"
-files = ["src", "scripts"]
+files = ["src", "scripts", "tests/type_checks"]
 
 [tool.pyright]
-include = ["src", "scripts"]
+include = ["src", "scripts", "tests/type_checks"]
 typeCheckingMode = "strict"
 pythonVersion = "3.11"
 

@@ -90,11 +90,11 @@ client = DevupAI(
 | Option            | Type                                    | Default                      | Description |
 | ----------------- | --------------------------------------- | ---------------------------- | ----------- |
 | `api_key`         | `str \| None`                           | See [API key](#api-key)      | Your DEVUP AI API key. |
-| `base_url`        | `str \| None`                           | `https://api.devupai.com/v1` | DEVUP AI API base URL. A trailing `/` is removed. |
+| `base_url`        | `str \| None`                           | `https://api.devupai.com/v1` | DEVUP AI API base URL. A trailing `/` is removed. It must be an absolute `http` or `https` URL without a user name or password (`ValueError` otherwise). |
 | `timeout`         | `float \| None`                         | `600.0` (10 minutes)         | Seconds. One limit for the whole call, retries included. The Node.js SDK takes this value in milliseconds; this SDK takes seconds. |
 | `max_retries`     | `int \| None`                           | `2`                          | How many times a request is sent again. See [Retries](#retries). |
 | `default_headers` | `Mapping[str, str] \| None`             | —                            | Headers included in every request. |
-| `http_client`     | `httpx.Client` / `httpx.AsyncClient`    | A client the SDK creates     | Your own `httpx.Client` (for `DevupAI`) or `httpx.AsyncClient` (for `AsyncDevupAI`). The SDK never closes a client you pass. |
+| `http_client`     | `httpx.Client` / `httpx.AsyncClient`    | A client the SDK creates     | Your own `httpx.Client` (for `DevupAI`) or `httpx.AsyncClient` (for `AsyncDevupAI`). Only its transport, connection pool and event hooks apply: its own `auth`, base URL, headers, query parameters, cookies and timeouts are not used (each request takes the `timeout` of this client or of the call). The SDK never closes a client you pass. |
 | `on_debug`        | `Callable[[DebugEvent], None] \| None`  | —                            | Receives debug events, such as `retry` before each retry. An exception raised in it is ignored. |
 
 `timeout` must be a positive number of seconds, and `max_retries` a

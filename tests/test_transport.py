@@ -539,38 +539,43 @@ def test_closed_client_raises_runtime_error_before_any_request(client_kind: str)
     assert api.calls == []
 
 
-def test_non_httpx_exception_becomes_a_connection_error_and_is_retried_by_default(
-    client_kind: str, fake_clock: Any
-) -> None:
+def test_non_httpx_exception_is_raised_unchanged_and_not_retried_by_default(client_kind: str, fake_clock: Any) -> None:
+    # P2 decision B-2: DEFAULT retries only httpx.TransportError; any other exception is raised unchanged, at once.
+    # Before: APIConnectionError "Network error: boom" chained to the ValueError, max_retries + 1 = 3 calls.
+    boom = ValueError("boom")
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise ValueError("boom")
+        raise boom
 
     api = MockAPI(handler)
     client = api.client(client_kind)
-    with pytest.raises(APIConnectionError) as info:
+    with pytest.raises(ValueError) as info:
         run_request(client, "GET", "/models", retry=DEFAULT_RETRY)
-    err = info.value
-    assert type(err) is APIConnectionError
-    assert err.status == 0
-    assert err.message == "Network error: boom"
-    assert isinstance(err.__cause__, ValueError)
-    assert len(api.calls) == client.max_retries + 1 == 3
+    assert info.value is boom
+    assert client.max_retries == 2
+    assert len(api.calls) == 1
+    assert fake_clock.sleeps == []
 
 
-def test_non_httpx_exception_is_not_retried_on_a_billed_call(client_kind: str) -> None:
+def test_non_httpx_exception_is_raised_unchanged_on_a_billed_call(client_kind: str) -> None:
+    # P2 decision B-2: the same on BILLED_POST. Before: APIConnectionError "Network error: boom", 1 call.
+    boom = ValueError("boom")
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise ValueError("boom")
+        raise boom
 
     api = MockAPI(handler)
-    with pytest.raises(APIConnectionError) as info:
+    with pytest.raises(ValueError) as info:
         run_request(api.client(client_kind), "POST", "/chat/completions", body={}, retry=BILLED_POST_RETRY)
-    assert info.value.message == "Network error: boom"
+    assert info.value is boom
     assert len(api.calls) == 1
 
 
 def test_exception_without_a_message_is_described_as_unknown_error(client_kind: str) -> None:
+    # P2 decision B-2: a ValueError() is now raised unchanged, so the empty message is checked on a transport
+    # error. Before: the handler raised ValueError().
     def handler(request: httpx.Request) -> httpx.Response:
-        raise ValueError()
+        raise httpx.ConnectError("")
 
     api = MockAPI(handler)
     with pytest.raises(APIConnectionError) as info:

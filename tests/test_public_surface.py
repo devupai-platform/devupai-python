@@ -154,8 +154,35 @@ COMPANY_TERM_HASHES = frozenset(
 FORBIDDEN_TERM_HASHES = NODE_TERM_HASHES | ARCHITECTURE_TERM_HASHES | COMPANY_TERM_HASHES
 
 #: A legitimate use of a listed word: ``(text, files or None for everywhere, why)``. The text is removed from a line
-#: before its words are checked. Empty: no entry is needed for ``src/``, README or pyproject (Node parity).
-ALLOWED_TEXT: list[tuple[str, tuple[str, ...] | None, str]] = []
+#: before its words are checked. Only exact field names (and enum values) copied from the vendored spec are allowed
+#: here, each limited to the files that type that field; ``why`` cites the spec ``file:line`` the self-test reads.
+ALLOWED_TEXT: list[tuple[str, tuple[str, ...] | None, str]] = [
+    (
+        "cached:",
+        ("src/devupai/types/models.py",),
+        "ModelPricing field name, spec openapi/devupai-v1.yaml:6544",
+    ),
+    (
+        "cached_tokens:",
+        ("src/devupai/types/shared.py",),
+        "TokenUsage.prompt_tokens_details field name, spec openapi/devupai-v1.yaml:4164",
+    ),
+    (
+        "cached_tokens:",
+        ("src/devupai/types/responses.py",),
+        "ResponsesResponse usage input_tokens_details field name, spec openapi/devupai-v1.yaml:4633",
+    ),
+    (
+        "settlement:",
+        ("src/devupai/types/webhooks.py",),
+        "webhook payload field name, spec openapi/devupai-v1.yaml:3293 (also :3336)",
+    ),
+    (
+        '"settled"',
+        ("src/devupai/types/webhooks.py",),
+        "enum value of that webhook field, spec openapi/devupai-v1.yaml:3295",
+    ),
+]
 
 _WORD = re.compile(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -271,10 +298,37 @@ def test_the_list_holds_node_s_entries_plus_the_company_entries() -> None:
     assert len(FORBIDDEN_TERM_HASHES) == 39 + 0 + 50
 
 
-def test_the_exception_list_is_empty() -> None:
-    # Node parity: no exception is needed for src/, README or pyproject. Adding one needs its own self-tests
-    # (each entry names a listed word, removes only itself, and a file-limited entry applies nowhere else).
-    assert ALLOWED_TEXT == []
+_SPEC_CITE = re.compile(r"openapi/devupai-v1\.yaml:(\d+)")
+
+
+@pytest.mark.parametrize("entry", ALLOWED_TEXT, ids=[f"{e[0]}@{(e[1] or ('*',))[0]}" for e in ALLOWED_TEXT])
+def test_each_exception_is_an_exact_spec_name_limited_to_its_files(
+    entry: tuple[str, tuple[str, ...] | None, str],
+) -> None:
+    # P2 decision B-5: the exception list holds only exact field names copied from the spec. Each entry must name a
+    # listed word, be limited to named files, appear in each of them, apply nowhere else, and match the spec line it
+    # cites.
+    text, files, why = entry
+    assert files, "an exception must be limited to the files that type the field"
+    assert any(term_hash(word) in FORBIDDEN_TERM_HASHES for word in words(text)), f"{text!r} names no listed word"
+    for name in files:
+        assert text in _read_text(ROOT / name), f"{text!r} does not appear in {name}"
+    assert line_hits("README.md", text), f"{text!r} must not be allowed outside its files"
+    cite = _SPEC_CITE.search(why)
+    assert cite, f"{why!r} must cite the spec line"
+    spec_lines = _read_text(ROOT / "openapi" / "devupai-v1.yaml").splitlines()
+    spec_line = spec_lines[int(cite.group(1)) - 1]
+    name_in_spec = text.strip('"').rstrip(":")
+    assert re.search(rf"(^|[\s\[,]){re.escape(name_in_spec)}(:|[\],]|$)", spec_line.strip()), (
+        f"{name_in_spec!r} is not on the cited spec line {cite.group(1)}: {spec_line.strip()!r}"
+    )
+
+
+def test_an_exception_removes_only_its_own_text() -> None:
+    probe = frozenset({term_hash("cached"), term_hash("settlement")})
+    assert line_hits("src/devupai/types/models.py", "    cached: float | None = None", probe) == []
+    assert set(line_hits("src/devupai/types/models.py", "    # cached values", probe)) == {"cached"}
+    assert set(line_hits("src/devupai/types/account.py", "    cached: float | None = None", probe)) == {"cached"}
 
 
 def test_scope_is_not_empty() -> None:

@@ -24,6 +24,33 @@ import httpx
 from devupai._errors import APIConnectionError, APITimeoutError, DevupAPIError, error_from_body
 from devupai._response import APIResponse, make_api_response
 from devupai._version import __version__
+from devupai.resources import (
+    AsyncAudio,
+    AsyncBalance,
+    AsyncChat,
+    AsyncEmbeddings,
+    AsyncHealth,
+    AsyncImages,
+    AsyncMe,
+    AsyncModels,
+    AsyncNativeInference,
+    AsyncRerank,
+    AsyncResponses,
+    AsyncVideo,
+    Audio,
+    Balance,
+    Chat,
+    Embeddings,
+    Health,
+    Images,
+    Me,
+    Models,
+    NativeInference,
+    Rerank,
+    Responses,
+    Video,
+)
+from devupai.webhooks import Webhooks
 
 __all__ = [
     "BILLED_POST_RETRY",
@@ -40,7 +67,9 @@ __all__ = [
     "DevupAI",
     "RequestOptions",
     "RetryPolicy",
+    "async_request",
     "connection_never_opened",
+    "sync_request",
 ]
 
 # Module-level hooks. They are always called through the module, so tests can replace them.
@@ -93,8 +122,13 @@ _HEADER_WHITESPACE = " \t"
 _HEADER_PROTOCOL_MESSAGE = "The request could not be sent: a header value is not valid."
 _BASE_URL_MESSAGE = "base_url must be an absolute http or https URL."
 _URL_MESSAGE = "url must be an absolute http or https URL."
+_BASE_URL_CREDENTIALS_MESSAGE = "base_url must not contain a user name or password."
+_URL_CREDENTIALS_MESSAGE = "url must not contain a user name or password."
 # An RFC 9110 token: the characters allowed in a header name.
 _HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+# Failures of a body read that come from the connection or from the bytes the API sent (a body that cannot be
+# decoded, for example a corrupt gzip). Any other exception raised while a body is read is raised unchanged.
+_BODY_READ_ERRORS = (httpx.TransportError, httpx.DecodingError)
 
 ResponseKind = Literal["json", "text", "raw"]
 
@@ -204,11 +238,25 @@ def _check_api_key(value: object) -> str:
     return value
 
 
+def _has_credentials(url: httpx.URL) -> bool:
+    """True when ``url`` carries a user name or a password (``user:password@host``)."""
+    return bool(url.userinfo)
+
+
 def _check_base_url(value: object) -> str:
-    """``value`` or the default base URL, without a trailing ``/``."""
+    """``value`` or the default base URL, without a trailing ``/``. A user name or password in it is refused."""
     if value is not None and not isinstance(value, str):
         raise TypeError("base_url must be a string.")
-    return (value or DEFAULT_BASE_URL).rstrip("/")
+    base_url = (value or DEFAULT_BASE_URL).rstrip("/")
+    try:
+        parsed = httpx.URL(base_url)
+    except httpx.InvalidURL:
+        # Refused here, not at the first request, so repr() and base_url never show it: it can carry a password.
+        raise ValueError(_BASE_URL_MESSAGE) from None
+    if _has_credentials(parsed):
+        # The message never repeats the URL, so the credentials in it are not shown.
+        raise ValueError(_BASE_URL_CREDENTIALS_MESSAGE)
+    return base_url
 
 
 _HttpClientT = TypeVar("_HttpClientT", httpx.Client, httpx.AsyncClient)
@@ -468,15 +516,22 @@ class _BaseClient:
 
     def _build_url(self, path: str | None, url: str | None, query: Mapping[str, str | None] | None) -> httpx.URL:
         if url is not None:
-            base, message = url, _URL_MESSAGE
+            base, message, credentials_message = url, _URL_MESSAGE, _URL_CREDENTIALS_MESSAGE
         elif path is not None:
-            base, message = f"{self._base_url}{path}", _BASE_URL_MESSAGE
+            base, message, credentials_message = (
+                f"{self._base_url}{path}",
+                _BASE_URL_MESSAGE,
+                _BASE_URL_CREDENTIALS_MESSAGE,
+            )
         else:
             raise TypeError("A request needs a path or a url.")
         try:
             target = httpx.URL(base)
         except httpx.InvalidURL:
             raise ValueError(message) from None
+        if _has_credentials(target):
+            # httpx would turn them into a Basic Authorization header. The message never repeats the URL.
+            raise ValueError(credentials_message)
         if target.scheme not in ("http", "https") or not target.host:
             raise ValueError(message)
         for name, value in (query or {}).items():
@@ -531,10 +586,14 @@ class _BaseClient:
         return _monotonic() >= prepared.deadline
 
     def _send_failure(
-        self, prepared: _Prepared, error: Exception, attempt: int
+        self, prepared: _Prepared, error: httpx.TransportError, attempt: int
     ) -> tuple[APIConnectionError, float | None, Exception | None]:
-        """The error for an exception raised while sending, the wait before a new attempt (``None``: raise), and
-        the exception to chain the error to (``None``: chain nothing)."""
+        """The error for a transport error raised while sending, the wait before a new attempt (``None``: raise),
+        and the exception to chain the error to (``None``: chain nothing).
+
+        Only ``httpx.TransportError`` comes here. Any other exception raised by ``send`` (an event hook of a caller
+        ``http_client``, an encoding error, a caller's own error) is raised unchanged and is never retried.
+        """
         if isinstance(error, httpx.LocalProtocolError):
             # The request was refused before it was sent. The original message can quote a header value (the
             # API key included), so it is neither repeated nor chained. Sending again cannot succeed.
@@ -560,7 +619,8 @@ class _BaseClient:
         return wait
 
     def _body_error(self, prepared: _Prepared, response: httpx.Response, error: Exception) -> APIConnectionError:
-        """The error for a 2xx body that could not be read. It is never retried."""
+        """The error for a 2xx body that could not be read (a transport error, or the deadline passed). It is never
+        retried."""
         if self._past_deadline(prepared):
             return self._timeout_error(prepared)
         return APIConnectionError(0, f"Network error: {_describe(error)}", headers=response.headers)
@@ -657,6 +717,33 @@ class DevupAI(_BaseClient):
         self._owns_http = given is None
         self._http = httpx.Client(follow_redirects=False, trust_env=True, timeout=None) if given is None else given
 
+        self.chat: Chat = Chat(self)
+        """Chat completions: ``chat.completions.create``."""
+        self.responses: Responses = Responses(self)
+        """The Responses API: ``responses.create``."""
+        self.models: Models = Models(self)
+        """The model catalog: ``models.list`` and ``models.retrieve``."""
+        self.images: Images = Images(self)
+        """Image generation and editing."""
+        self.embeddings: Embeddings = Embeddings(self)
+        """Embeddings: ``embeddings.create``."""
+        self.rerank: Rerank = Rerank(self)
+        """Reranking: ``rerank.create``."""
+        self.audio: Audio = Audio(self)
+        """Speech and transcriptions."""
+        self.video: Video = Video(self)
+        """Video generations and edits."""
+        self.inference: NativeInference = NativeInference(self)
+        """Native inference: ``inference.run``."""
+        self.balance: Balance = Balance(self)
+        """The account balance: ``balance.retrieve``."""
+        self.me: Me = Me(self)
+        """The account profile: ``me.retrieve``."""
+        self.health: Health = Health(self)
+        """The API health check: ``health.check``."""
+        self.webhooks: Webhooks = Webhooks()
+        """Webhook signature checks; they run locally and send nothing."""
+
     def close(self) -> None:
         """Closes the HTTP client this client created. Calling it again does nothing."""
         if self._closed:
@@ -707,8 +794,9 @@ class DevupAI(_BaseClient):
         while True:
             request = self._attempt_request(prepared)
             try:
-                response = self._http.send(request, stream=True, follow_redirects=False)
-            except Exception as error:
+                # auth=None: the auth of a caller http_client is never applied; the key goes in the headers.
+                response = self._http.send(request, stream=True, auth=None, follow_redirects=False)
+            except httpx.TransportError as error:
                 failure, wait, cause = self._send_failure(prepared, error, attempt)
                 if wait is None:
                     raise failure from cause
@@ -724,7 +812,9 @@ class DevupAI(_BaseClient):
             if not response.is_success:
                 try:
                     text = _decode(_read_with_deadline(response, prepared.deadline))
-                except Exception as error:
+                except _DeadlinePassed as error:
+                    raise self._timeout_error(prepared) from error
+                except _BODY_READ_ERRORS as error:
                     if self._past_deadline(prepared):
                         raise self._timeout_error(prepared) from error
                     # The body could not be read: the message falls back to the HTTP status.
@@ -743,7 +833,7 @@ class DevupAI(_BaseClient):
                 return make_api_response(response, response)
             try:
                 content = _read_with_deadline(response, prepared.deadline)
-            except Exception as error:
+            except (_DeadlinePassed, *_BODY_READ_ERRORS) as error:
                 raise self._body_error(prepared, response, error) from error
             finally:
                 response.close()
@@ -782,6 +872,33 @@ class AsyncDevupAI(_BaseClient):
         given = _check_http_client(http_client, httpx.AsyncClient, "http_client must be an httpx.AsyncClient.")
         self._owns_http = given is None
         self._http = httpx.AsyncClient(follow_redirects=False, trust_env=True, timeout=None) if given is None else given
+
+        self.chat: AsyncChat = AsyncChat(self)
+        """Chat completions: ``chat.completions.create``."""
+        self.responses: AsyncResponses = AsyncResponses(self)
+        """The Responses API: ``responses.create``."""
+        self.models: AsyncModels = AsyncModels(self)
+        """The model catalog: ``models.list`` and ``models.retrieve``."""
+        self.images: AsyncImages = AsyncImages(self)
+        """Image generation and editing."""
+        self.embeddings: AsyncEmbeddings = AsyncEmbeddings(self)
+        """Embeddings: ``embeddings.create``."""
+        self.rerank: AsyncRerank = AsyncRerank(self)
+        """Reranking: ``rerank.create``."""
+        self.audio: AsyncAudio = AsyncAudio(self)
+        """Speech and transcriptions."""
+        self.video: AsyncVideo = AsyncVideo(self)
+        """Video generations and edits."""
+        self.inference: AsyncNativeInference = AsyncNativeInference(self)
+        """Native inference: ``inference.run``."""
+        self.balance: AsyncBalance = AsyncBalance(self)
+        """The account balance: ``balance.retrieve``."""
+        self.me: AsyncMe = AsyncMe(self)
+        """The account profile: ``me.retrieve``."""
+        self.health: AsyncHealth = AsyncHealth(self)
+        """The API health check: ``health.check``."""
+        self.webhooks: Webhooks = Webhooks()
+        """Webhook signature checks (synchronous on both clients); they run locally and send nothing."""
 
     async def close(self) -> None:
         """Closes the HTTP client this client created. Calling it again does nothing."""
@@ -833,8 +950,9 @@ class AsyncDevupAI(_BaseClient):
         while True:
             request = self._attempt_request(prepared)
             try:
-                response = await self._http.send(request, stream=True, follow_redirects=False)
-            except Exception as error:
+                # auth=None: the auth of a caller http_client is never applied; the key goes in the headers.
+                response = await self._http.send(request, stream=True, auth=None, follow_redirects=False)
+            except httpx.TransportError as error:
                 failure, wait, cause = self._send_failure(prepared, error, attempt)
                 if wait is None:
                     raise failure from cause
@@ -850,9 +968,9 @@ class AsyncDevupAI(_BaseClient):
             if not response.is_success:
                 try:
                     text = _decode(await _aread_with_deadline(response, prepared.deadline))
-                except TimeoutError as error:
+                except (TimeoutError, _DeadlinePassed) as error:
                     raise self._timeout_error(prepared) from error
-                except Exception as error:
+                except _BODY_READ_ERRORS as error:
                     if self._past_deadline(prepared):
                         raise self._timeout_error(prepared) from error
                     # The body could not be read: the message falls back to the HTTP status.
@@ -873,8 +991,23 @@ class AsyncDevupAI(_BaseClient):
                 content = await _aread_with_deadline(response, prepared.deadline)
             except TimeoutError as error:
                 raise self._timeout_error(prepared) from error
-            except Exception as error:
+            except (_DeadlinePassed, *_BODY_READ_ERRORS) as error:
                 raise self._body_error(prepared, response, error) from error
             finally:
                 await response.aclose()
             return self._parse(prepared, response, content)
+
+
+def sync_request(client: DevupAI, *args: Any, **kwargs: Any) -> APIResponse[Any]:
+    """Sends a request through ``client`` with the parameters of ``DevupAI._request``; used by the resources.
+
+    The request method is looked up on the instance at each call, so a method set on the instance is the one used.
+    """
+    # This module defines the class; these two functions are the one place outside it that calls _request, so the
+    # resources never touch a protected member.
+    return client._request(*args, **kwargs)  # pyright: ignore[reportPrivateUsage]
+
+
+async def async_request(client: AsyncDevupAI, *args: Any, **kwargs: Any) -> APIResponse[Any]:
+    """The async twin of :func:`sync_request`, with the parameters of ``AsyncDevupAI._request``."""
+    return await client._request(*args, **kwargs)  # pyright: ignore[reportPrivateUsage]
