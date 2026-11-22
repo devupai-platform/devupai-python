@@ -22,15 +22,20 @@ ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = ROOT / "CHANGELOG.md"
 PYPROJECT = ROOT / "pyproject.toml"
 
-#: The GitHub release body of 1.0.0, kept with the release reports next to this repository. A standalone checkout
-#: of the SDK does not have it.
-RELEASE_NOTES = ROOT.parent / ".agent-prompts" / "reports" / "PYSDK-1" / "p4" / "release-notes-1.0.0.md"
+#: The GitHub release body of each version, kept with the release reports next to this repository. A standalone
+#: checkout of the SDK does not have them.
+_REPORTS = ROOT.parent / ".agent-prompts" / "reports"
+RELEASE_NOTES = _REPORTS / "SDK-RETRY-HINT-1" / "release-notes-1.0.1.md"
+PUBLISHED_NOTES = {"1.0.0": _REPORTS / "PYSDK-1" / "p4" / "release-notes-1.0.0.md"}
 
-RELEASE = "1.0.0"
-PREVIOUS = "1.0.0a1"
+RELEASE = "1.0.1"
+PREVIOUS = "1.0.0"
 
-#: sha256 of the published ``## [1.0.0a1]`` entry body. A released entry never changes.
-PREVIOUS_BODY_SHA256 = "4333eaa4588e6cc2694e58976e9bdf815bc858f0a6ea1837aac75cd36a0bfe87"
+#: sha256 of each published entry body. A released entry never changes.
+PUBLISHED_BODY_SHA256 = {
+    "1.0.0": "aef59d26ac3f7f95854e4d991df89c960e219df3a7fd67a3db8ebb624e13a439",
+    "1.0.0a1": "4333eaa4588e6cc2694e58976e9bdf815bc858f0a6ea1837aac75cd36a0bfe87",
+}
 
 #: The ``### `` section titles the Node SDK changelog uses.
 SECTIONS = frozenset({"Breaking changes", "Notes", "Added", "Changed", "Fixed", "Removed", "Docs"})
@@ -145,19 +150,24 @@ def test_the_release_entry_has_a_lead_paragraph_then_node_sections() -> None:
 
 def test_the_release_entry_names_the_one_behaviour_change_in_its_lead() -> None:
     lead = _entry(RELEASE).partition("\n### ")[0]
-    assert "response_type" in lead
-    assert "ValueError" in lead
+    assert "`x-should-retry: false`" in lead
+    assert "No breaking changes" in lead
 
 
 def test_the_release_entry_installs_without_pre() -> None:
     body = _entry(RELEASE)
-    assert "`pip install devupai`" in body
+    assert re.search(r"`pip install (--upgrade )?devupai`", body), body
     assert not re.search(r"pip install [^`\n]*--pre", body), body
 
 
-def test_the_previous_entry_is_unchanged() -> None:
-    body = _entry(PREVIOUS)
-    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == PREVIOUS_BODY_SHA256
+@pytest.mark.parametrize("version", sorted(PUBLISHED_BODY_SHA256))
+def test_a_published_entry_is_unchanged(version: str) -> None:
+    body = _entry(version)
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == PUBLISHED_BODY_SHA256[version]
+
+
+def test_the_previous_entry_is_a_published_one() -> None:
+    assert PREVIOUS in PUBLISHED_BODY_SHA256
 
 
 # --- the wording -----------------------------------------------------------------------------------------------
@@ -191,3 +201,11 @@ def test_the_release_notes_are_the_release_entry_body() -> None:
     notes = RELEASE_NOTES.read_bytes().decode("utf-8")
     assert "\r" not in notes
     assert notes == _entry(RELEASE)
+
+
+@pytest.mark.parametrize("version", sorted(PUBLISHED_NOTES))
+def test_published_release_notes_still_match_their_entry(version: str) -> None:
+    path = PUBLISHED_NOTES[version]
+    if not path.is_file():
+        pytest.skip(f"{path.name} is kept next to the repository, not in a standalone checkout")
+    assert path.read_bytes().decode("utf-8") == _entry(version)

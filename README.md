@@ -1279,6 +1279,9 @@ request may already have been processed and charged.
 On every request, a read or write timeout ends the call with
 `APITimeoutError` and is not sent again.
 
+If a response carries `x-should-retry: false`, the SDK does not resend the
+request.
+
 `max_retries` applies to both groups, and `max_retries=0` turns retries off.
 To check a billed request's outcome before anything is sent again, set
 `max_retries=0` on that call.

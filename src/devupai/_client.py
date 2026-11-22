@@ -183,6 +183,17 @@ that was never opened. A 408, 502 or 504 answer, or a connection lost after it w
 request was processed and charged, so it is not retried."""
 
 
+def _retry_refused(headers: Mapping[str, str]) -> bool:
+    """True when the answer carries ``x-should-retry: false``: the request is not sent again.
+
+    The header name is matched without regard to case; the value is trimmed and compared, lower-cased, to ``false``.
+    Any other value, or no header, leaves the retry rules unchanged. Only ``false`` is honoured:
+    ``x-should-retry: true`` never widens them, because a retry it allowed could send a billed request again (a billed
+    ``POST`` is still sent again only after 429, 503 or a connection that was never opened).
+    """
+    return any(name.lower() == "x-should-retry" and value.strip().lower() == "false" for name, value in headers.items())
+
+
 def connection_never_opened(error: BaseException) -> bool:
     """True when ``error`` shows that the connection was never opened, so the request was not sent.
 
@@ -708,6 +719,10 @@ class _BaseClient:
 
     def _status_wait(self, prepared: _Prepared, error: DevupAPIError, attempt: int) -> float | None:
         """The wait before a new attempt after an error status, or ``None`` when the error is raised."""
+        # Checked before the status rules: an answer that asks for no new attempt is never sent again, whatever its
+        # status, the method or the retry budget (sync and async clients, plain, raw and stream calls all come here).
+        if _retry_refused(error.headers):
+            return None
         if error.status not in prepared.retry.statuses or attempt >= prepared.max_retries:
             return None
         wait = self._retry_wait(error.retry_after_ms, attempt, prepared.deadline)

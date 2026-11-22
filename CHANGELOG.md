@@ -2,6 +2,20 @@
 
 All notable changes to the `devupai` Python package are documented in this file.
 
+## [1.0.1]
+
+No breaking changes. A request whose answer carries `x-should-retry: false`
+is not sent again. Upgrade with `pip install --upgrade devupai`.
+
+### Changed
+
+- `DevupAI` and `AsyncDevupAI` do not send a request again when its answer
+  carries `x-should-retry: false`, whatever the status, the method or
+  `max_retries`. This applies to every method, to `with_response` calls and
+  to streams. The error you receive is the same as before, and its `headers`
+  show the value. Any other value of the header, or no header, keeps the
+  retries described in the README; `x-should-retry: true` adds no retries.
+
 ## [1.0.0]
 
 The first stable release. Install it with `pip install devupai`; `--pre` is
