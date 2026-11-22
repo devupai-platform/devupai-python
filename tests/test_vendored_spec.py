@@ -18,8 +18,8 @@ HASH_FILE = ROOT / "openapi" / "SPEC_SHA256"
 SCRIPT = ROOT / "scripts" / "sync_spec.py"
 GITATTRIBUTES = ROOT / ".gitattributes"
 
-EXPECTED_SHA256 = "02756c42c8a76860e371653aa81c7d12137a44ae3bf630216e38931ad91131f7"
-EXPECTED_SIZE = 300042
+EXPECTED_SHA256 = "c1aa27c94578e72bcdaab37d6a0b65cb4dd01ab9e49c64a680b641a982198d97"
+EXPECTED_SIZE = 300390
 
 
 def _attribute_lines() -> list[str]:
