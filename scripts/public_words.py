@@ -155,17 +155,17 @@ ALLOWED_TEXT: list[tuple[str, tuple[str, ...] | None, str]] = [
     (
         "cached:",
         ("src/devupai/types/models.py",),
-        "ModelPricing field name, spec openapi/devupai-v1.yaml:6544",
+        "ModelPricing field name, spec openapi/devupai-v1.yaml:6549",
     ),
     (
         "cached_tokens:",
         ("src/devupai/types/shared.py",),
-        "TokenUsage.prompt_tokens_details field name, spec openapi/devupai-v1.yaml:4164",
+        "TokenUsage.prompt_tokens_details field name, spec openapi/devupai-v1.yaml:4169",
     ),
     (
         "cached_tokens:",
         ("src/devupai/types/responses.py",),
-        "ResponsesResponse usage input_tokens_details field name, spec openapi/devupai-v1.yaml:4633",
+        "ResponsesResponse usage input_tokens_details field name, spec openapi/devupai-v1.yaml:4638",
     ),
     (
         "settlement:",
